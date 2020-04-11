@@ -1486,7 +1486,7 @@ int main(int argc, char **argv) {
 		}
 	}
 	time += chrono();
-	if (div || loop) printf("total   : %15llu leaves in %10.3f s %12.0f leaves/s\n", total, time, total / time);
+	if (div || loop) printf("total    : %15llu leaves in %10.3f s %12.0f leaves/s\n", total, time, total / time);
 
 	board_destroy(board);
 	hash_destroy(hashtable);
