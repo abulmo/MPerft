@@ -237,7 +237,7 @@ void parse_error(const char *string, const char *done, const char *msg) {
 
 /* Skip spaces */
 char *parse_next(const char *s) {
-	while (isspace(*s)) ++s;
+	while (isspace((int)*s)) ++s;
 	return (char*) s;
 }
 
@@ -815,7 +815,7 @@ void board_set(Board *board, char *string) {
 			if (r <= 0) parse_error(string, s, "FEN: too many ranks");
 			if (f != 8) parse_error(string, s, "FEN: missing square");
 			f = 0; r--;
-		} else if (isdigit(*s)) {
+		} else if (isdigit((int)*s)) {
 			f += (Square) (*s - '0');
 			if (f > 8) parse_error(string, s, "FEN: file overflow");
 		} else {
@@ -1432,7 +1432,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "-c")) capture = true;
 		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
 		else if (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-H")) hash_size = atoi(argv[++i]);
-		else if (isdigit(argv[i][0])) depth = atoi(argv[i]);
+		else if (isdigit((int)argv[i][0])) depth = atoi(argv[i]);
 		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
 			test(board);
 			return 0;
