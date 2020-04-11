@@ -119,8 +119,8 @@ typedef struct MoveArray {
 
 typedef struct {
 	uint64_t code;
-	uint64_t count;
-	int depth;
+	uint64_t count: 56;
+	int depth:       8;
 } Hash;
 
 typedef struct {
