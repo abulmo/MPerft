@@ -1,0 +1,6 @@
+*.dyn
+*.gcda
+*.gcno
+*.prof*
+mperft
+mperft.exe
