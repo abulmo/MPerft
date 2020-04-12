@@ -8,7 +8,6 @@
  */
 
 /* Includes */
-#include <assert.h> // to debug
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -102,9 +101,9 @@ typedef struct BoardStack {
 } BoardStack;
 
 typedef struct Board {
+	uint8_t cpiece[BOARD_SIZE];
 	Bitboard piece[PIECE_SIZE];
 	Bitboard color[COLOR_SIZE];
-	uint8_t cpiece[BOARD_SIZE];
 	BoardStack stack_[GAME_SIZE],*stack;
 	Square x_king[COLOR_SIZE];
 	int ply;
@@ -119,8 +118,8 @@ typedef struct MoveArray {
 
 typedef struct {
 	uint64_t code;
-	uint64_t count;
-	int depth;
+	uint64_t count:56;
+	int depth:8;
 } Hash;
 
 typedef struct {
@@ -598,6 +597,10 @@ void init(void) {
     static const int king_dir[8][2] = {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
 
 	// MASK initialisations
+	MASK->bishop.attack = aligned_alloc(64, sizeof (Bitboard) * 0x1480);
+	if (MASK->bishop.attack == NULL) memory_error(__func__);
+	MASK->rook.attack = aligned_alloc(64, sizeof (Bitboard) * 0x19000);
+	if (MASK->rook.attack == NULL) memory_error(__func__);
 	for (x = 0; x < 64; ++x) {
 		f = file(x);
 		r = rank(x);
@@ -649,7 +652,6 @@ void init(void) {
 		mask->bishop.shift = 64 - count_moves(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
 		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << count_moves(mask[-1].bishop.mask));
-		else mask->bishop.attack = malloc(sizeof (Bitboard) * 0x1480);
 		o = 0; do {
 			mask->bishop.attack[magic_index(o, &mask->bishop)] = compute_slider_attack(x, o, bishop_dir);
 			o = (o - mask->bishop.mask) & mask->bishop.mask;
@@ -660,7 +662,6 @@ void init(void) {
 		mask->rook.shift = 64 - count_moves(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
 		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << count_moves(mask[-1].rook.mask));
-		else mask->rook.attack = malloc(sizeof (Bitboard) * 0x19000);
 		o = 0; do {
 			mask->rook.attack[magic_index(o, &mask->rook)] = compute_slider_attack(x, o, rook_dir);
 			o = (o - mask->rook.mask) & mask->rook.mask;
@@ -867,7 +868,7 @@ void board_set(Board *board, char *string) {
 
 /* Create a board structure */
 Board* board_create(void) {
-	Board *board = malloc(sizeof (Board));
+	Board *board = aligned_alloc(64, sizeof (Board));
 	if (board == NULL) memory_error(__func__);
 	board_init(board);
 	return board;
@@ -1279,9 +1280,9 @@ HashTable* hash_create(const int b) {
 
 	HashTable *hashtable = malloc(sizeof (HashTable));
 	if (hashtable == NULL) memory_error(__func__);
-	hashtable->hash = malloc((n + BUCKET_SIZE) * sizeof (Hash));
+	hashtable->hash = aligned_alloc(64, (n + BUCKET_SIZE) * sizeof (Hash));
 	if (hashtable->hash == NULL) memory_error(__func__);
-	hashtable->mask = n - 1;
+	hashtable->mask = (n - 1) & ~3;
 
 	for (i = 0; i <= hashtable->mask + BUCKET_SIZE; ++i) hashtable->hash[i] = hash_init;
 
@@ -1432,7 +1433,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "-c")) capture = true;
 		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
 		else if (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-H")) hash_size = atoi(argv[++i]);
-		else if (isdigit((int)argv[i][0])) depth = atoi(argv[i]);
+		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
 		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
 			test(board);
 			return 0;
