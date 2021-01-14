@@ -27,6 +27,7 @@ void* aligned_alloc(size_t, size_t);
 
 #ifdef _WIN32
 #include <windows.h>
+#define aligned_alloc(a, b) _aligned_malloc((b), (a))	
 #endif
 
 #ifdef USE_PEXT
@@ -1335,7 +1336,7 @@ uint64_t perft(Board *board, HashTable *hashtable, const int depth, const bool b
 	const bool use_hash = (hashtable && depth > 2);
 	Key *key = &board->stack[1].key;
 
-	movearray_generate(ma, board, do_quiet | board->stack->checkers);
+	movearray_generate(ma, board, do_quiet || board->stack->checkers);
 
 	while ((move = movearray_next(ma)) != 0) {
 		if (use_hash) {
@@ -1344,7 +1345,7 @@ uint64_t perft(Board *board, HashTable *hashtable, const int depth, const bool b
 		}
 		board_update(board, move);
 			if (depth == 1) ++count;
-			else if (bulk && depth == 2) count += generate_moves(board, NULL, false, do_quiet);
+			else if (bulk && depth == 2) count += generate_moves(board, NULL, false, do_quiet || board->stack->checkers);
 			else {
 				if (use_hash) {
 					hash_count = hash_probe(hashtable, key, depth - 1);
@@ -1398,7 +1399,6 @@ void test(Board *board) {
 		unsigned long long count = perft(board, NULL, t->depth, true, true);
 		if (count == t->result) printf(" passed\n"); else printf(" FAILED ! %llu != %llu\n", count, t->result);
 	}
-	board_destroy(board);
 }
 
 /* main */
@@ -1413,7 +1413,7 @@ int main(int argc, char **argv) {
 	bool div = false, capture = false, bulk = false, loop = false;
 	char *fen = NULL;
 
-	puts("Magic Perft (c) version 1.0 Richard Delorme - 2020");
+	puts("Magic Perft (c) version 1.1 Richard Delorme - 2020");
 #if USE_PEXT
 	puts("Bitboard move generation based on magic (pext) bitboards");
 #else
@@ -1436,6 +1436,7 @@ int main(int argc, char **argv) {
 		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
 		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
 			test(board);
+			board_destroy(board);
 			return 0;
 		} else {
 			printf("%s [--fen|-f <fen>] [--depth|-d <depth>] [--hash|-H <size>] [--bulk|-b] [--div] [--capture] | [--help|-h] | [--test|-t]\n", argv[0]);
@@ -1469,10 +1470,12 @@ int main(int argc, char **argv) {
 
 	// root search
 	if (div) {
-		movearray_generate(ma, board, !capture);
+		movearray_generate(ma, board, !capture || board->stack->checkers);
 		while ((move = movearray_next(ma)) != 0) {
 			board_update(board, move);
-				count = depth <= 1 ? 1 : perft(board, hashtable, depth - 1, bulk, !capture);
+				if (depth == 1) count = 1;
+				else if (bulk && depth == 2) count = generate_moves(board, NULL, false, !capture || board->stack->checkers);
+				else count = perft(board, hashtable, depth - 1, bulk, !capture);
 				total += count;
 				printf("%5s %16llu\n", move_to_string(move, NULL), count);
 			board_restore(board, move);
