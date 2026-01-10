@@ -1473,6 +1473,7 @@ int main(int argc, char **argv) {
 		movearray_generate(ma, board, !capture || board->stack->checkers);
 		while ((move = movearray_next(ma)) != 0) {
 			board_update(board, move);
+            key_set(&board->stack->key, board);
 				if (depth == 1) count = 1;
 				else if (bulk && depth == 2) count = generate_moves(board, NULL, false, !capture || board->stack->checkers);
 				else count = perft(board, hashtable, depth - 1, bulk, !capture);
