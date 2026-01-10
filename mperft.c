@@ -439,6 +439,14 @@ char* move_to_string(const Move move, char *s) {
 	return s;
 }
 
+/* Compare moves alphabetically */
+int compare_moves(const void *a, const void *b) {
+    char s1[8], s2[8];
+    move_to_string(*(const Move*)a, s1);
+    move_to_string(*(const Move*)b, s2);
+    return strcmp(s1, s2);
+}
+
 /* Generate attack index using the magic bitboard or pext approach */
 Bitboard magic_index(const Bitboard pieces, const Attack *attack) {
 #ifdef USE_PEXT
@@ -1471,6 +1479,9 @@ int main(int argc, char **argv) {
 	// root search
 	if (div) {
 		movearray_generate(ma, board, !capture || board->stack->checkers);
+        // Sort moves alphabetically
+        qsort(ma->move, ma->n, sizeof(Move), compare_moves);
+
 		while ((move = movearray_next(ma)) != 0) {
 			board_update(board, move);
 				if (depth == 1) count = 1;
