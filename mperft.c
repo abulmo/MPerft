@@ -869,7 +869,8 @@ void board_set(Board *board, char *string) {
 
 /* Create a board structure */
 Board* board_create(void) {
-	Board *board = aligned_alloc(64, sizeof (Board));
+    int m64 = (sizeof(Board) + 63) & (~0x3f);
+    Board *board = aligned_alloc(64, m64);
 	if (board == NULL) memory_error(__func__);
 	board_init(board);
 	return board;
