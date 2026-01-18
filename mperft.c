@@ -1,14 +1,17 @@
 /*
  * mperft.c
  *
- * perft using magic bitboard
+ * perft using magic bitboard & transposition table.
+ * TODO: add multithreading
  *
- * © 2020 Richard Delorme
- * version 1.0
+ * © 2020-2056 Richard Delorme
+ * version 2.0
  */
 
 /* Includes */
+#include <bits/time.h>
 #include <ctype.h>
+#include <stdbit.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -16,22 +19,20 @@
 #include <string.h>
 #include <time.h>
 
-#ifndef _ISOC11_SOURCE
-void* aligned_alloc(size_t, size_t);
-#endif
-
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #include <sys/time.h>
 #endif
 
-#ifdef _WIN32
-#include <windows.h>
-#define aligned_alloc(a, b) _aligned_malloc((b), (a))	
+#if defined(_MSC_VER)
+	#include <intrin.h>
+#elif defined(__x86_64__)
+	#include <x86intrin.h>
 #endif
 
-#ifdef USE_PEXT
-    #include <immintrin.h>
+/* fast PEXT availability */
+#if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
+	#define HAS_PEXT 1
 #endif
 
 /* Types */
@@ -95,20 +96,24 @@ typedef struct Mask {
 typedef struct BoardStack {
 	Bitboard pinned;
 	Bitboard checkers;
+	Key key;
 	uint8_t castling;
 	uint8_t enpassant;
 	uint8_t victim;
-	Key key;
 } BoardStack;
 
 typedef struct Board {
-	uint8_t cpiece[BOARD_SIZE];
 	Bitboard piece[PIECE_SIZE];
 	Bitboard color[COLOR_SIZE];
-	BoardStack stack_[GAME_SIZE],*stack;
+	Bitboard pinned;
+	Bitboard checkers;
+	uint8_t cpiece[BOARD_SIZE];
 	Square x_king[COLOR_SIZE];
+	Key key;
 	int ply;
 	Color player;
+	uint8_t castling;
+	uint8_t enpassant;
 } Board;
 
 typedef struct MoveArray {
@@ -162,33 +167,11 @@ Key KEY_CASTLING[16];
 Key KEY_ENPASSANT[BOARD_SIZE + 1];
 Key KEY_PLAY;
 
-/* Count moves from a bitboard */
-int count_moves(Bitboard b) {
-#if defined(POPCOUNT) && defined(USE_MSVC_X64)
-		return __popcnt64(b);
-#elif defined(POPCOUNT) && defined(USE_GCC_X64)
-		return __builtin_popcountll(b);
-#else
-	Bitboard c = b
-		- ((b >> 1) & 0x7777777777777777ull)
-		- ((b >> 2) & 0x3333333333333333ull)
-		- ((b >> 3) & 0x1111111111111111ull);
-	c = ((c + (c >> 4)) & 0x0f0f0f0f0f0f0f0full) * 0x0101010101010101ull;
-
-	return  (int)(c >> 56);
-#endif
-}
-
-/* Verify if only one bit is set. */
-bool is_single(Bitboard b) {
-	return (b & (b - 1)) == 0;
-}
-
 /* Byte swap (= vertical mirror) */
 Bitboard bit_bswap(Bitboard b) {
-#if defined(USE_MSVC_X64)
+#if defined(_MSC_VER)
 	return _byteswap_uint64(b);
-#elif defined(USE_GCC_X64)
+#elif defined(__GNUC__)
 	return __builtin_bswap64(b);
 #else
 	b = ((b >>  8) & 0x00ff00ff00ff00ffull) | ((b <<  8) & 0xff00ff00ff00ff00ull);
@@ -197,7 +180,6 @@ Bitboard bit_bswap(Bitboard b) {
 	return b;
 #endif
 }
-
 
 /* Time in seconds */
 double chrono(void) {
@@ -259,12 +241,12 @@ void random_seed(Random *random, const uint64_t seed) {
 }
 
 /* Opponent color */
-Color opponent(const Color c) {
+static inline Color opponent(const Color c) {
 	return !c;
 }
 
 /* Convert a char to a Color */
-Color color_from_char(const char c) {
+static inline Color color_from_char(const char c) {
 	switch (tolower(c)) {
 		case 'b': return BLACK;
 		case 'w': return WHITE;
@@ -276,39 +258,39 @@ Color color_from_char(const char c) {
 #define foreach_color(c) for ((c) = WHITE; (c) < COLOR_SIZE; ++(c))
 
 /* Make a square from file & rank */
-Square square(const int f, const int r) {
+static inline Square square(const int f, const int r) {
 	return (r << 3) + f;
 }
 
 /* Make a square from file & rank if inside the board */
-Square square_safe(const int f, const int r) {
+static inline Square square_safe(const int f, const int r) {
 	if (0 <= f && f < 8 && 0 <= r && r < 8) return square(f, r);
 	else return BOARD_OUT;
 }
 
 /* Get square rank */
-Square rank(const Square x) {
+static inline Square rank(const Square x) {
 	return x >> 3;
 }
 
 /* Get square file */
-Square file(const Square x) {
+static inline Square file(const Square x) {
 	return x & 7;
 }
 
 /* Create a bitboard with one bit (square) set */
-Bitboard square_to_bit(const int x) {
+static inline Bitboard square_to_bit(const int x) {
 	return 1ULL << x;
 }
 
 /* Create a bitboard with one bit set from file/rank if inside the board */
-Bitboard file_rank_to_bit(const int f, const int r) {
+static inline Bitboard file_rank_to_bit(const int f, const int r) {
 	if (0 <= f && f < 8 && 0 <= r && r < 8) return square_to_bit(square(f, r));
 	else return 0;
 }
 
 /* Parse a square from a string. */
-bool square_parse(char **string, Square *x) {
+static inline bool square_parse(char **string, Square *x) {
 	const char *s = *string;
 	if ('a' <= s[0] && s[0] <= 'h' && '1' <= s[1] && s[1] <= '8') {
 		*x = square(s[0] - 'a', s[1] - '1');
@@ -318,30 +300,12 @@ bool square_parse(char **string, Square *x) {
 }
 
 /* Get the first occupied square from a bitboard */
-Square square_first(Bitboard b) {
-#if defined(USE_MSVC_X64)
-	unsigned long index;
-	_BitScanForward64(&index, b);
-	return (int) index;
-#elif defined(USE_GCC_X64)
-	return __builtin_ctzll(b);
-#else
-	const int magic[64] = {
-		63,  0, 58,  1, 59, 47, 53,  2,
-		60, 39, 48, 27, 54, 33, 42,  3,
-		61, 51, 37, 40, 49, 18, 28, 20,
-		55, 30, 34, 11, 43, 14, 22,  4,
-		62, 57, 46, 52, 38, 26, 32, 41,
-		50, 36, 17, 19, 29, 10, 13, 21,
-		56, 45, 25, 31, 35, 16,  9, 12,
-		44, 24, 15,  8, 23,  7,  6,  5
-	};
-	return magic[((b & (-b)) * 0x07edd5e59a4e28c2ull) >> 58];
-#endif
+static inline Square square_first(Bitboard b) {
+	return stdc_trailing_zeros_ul(b);
 }
 
 /* Get the next occupied square from a bitboard */
-Square square_next(Bitboard *b) {
+static inline Square square_next(Bitboard *b) {
 	int i = square_first(*b);
 	*b &= *b - 1;
 	return i;
@@ -351,43 +315,35 @@ Square square_next(Bitboard *b) {
 #define foreach_square(x) for ((x) = A1; (x) < BOARD_SIZE; ++(x))
 
 /* Check if square 'x' is on 7th rank */
-bool is_on_seventh_rank(const Square x, const Color c) {
+static inline bool is_on_seventh_rank(const Square x, const Color c) {
 	return c ? rank(x) == 1 : rank(x) == 6;
 }
 
 /* Check if square 'x' is on 2nd rank */
-bool is_on_second_rank(const Square x, const Color c) {
+static inline bool is_on_second_rank(const Square x, const Color c) {
 	return c ? rank(x) == 6 : rank(x) == 1;
-}
-
-/* Convert a char to a piece */
-Piece piece_from_char(const char c) {
-	Piece p;
-
-	for (p = PAWN; p < PIECE_SIZE; ++p) if ("pnbrqk"[p] == tolower(c)) break;
-	return p;
 }
 
 /* Loop over each cpiece */
 #define foreach_cpiece(cp) for ((cp) = WPAWN; (cp) < CPIECE_SIZE; ++(cp))
 
 /* make a colored piece */
-CPiece cpiece_make(Piece p, const Color c) {
+static inline CPiece cpiece_make(Piece p, const Color c) {
 	return (p << 1) + c + 1;
 }
 
 /* Get the Piece of a CPiece*/
-Piece cpiece_piece(CPiece p) {
+static inline Piece cpiece_piece(CPiece p) {
 	return (p - 1) >> 1;
 }
 
 /* Get the color of a CPiece */
-Color cpiece_color(CPiece p) {
+static inline Color cpiece_color(CPiece p) {
 	return (p - 1) & 1;
 }
 
 /* Convert a char to a colored piece */
-CPiece cpiece_from_char(const char c) {
+static inline CPiece cpiece_from_char(const char c) {
 	CPiece p;
 
 	foreach_cpiece(p) if ("#PpNnBbRrQqKk"[p] == c) break;
@@ -395,7 +351,7 @@ CPiece cpiece_from_char(const char c) {
 }
 
 /* Convert a char to a castling flag */
-int castling_from_char(const char c) {
+static inline int castling_from_char(const char c) {
 	switch (c) {
 		case 'K': return 1;
 		case 'Q': return 2;
@@ -406,22 +362,22 @@ int castling_from_char(const char c) {
 }
 
 /* Get the origin square of a move */
-Square move_from(const Move move) {
+static inline Square move_from(const Move move) {
 	return move & 63;
 }
 
 /* Get the destination square of a move */
-Square move_to(const Move move) {
+static inline Square move_to(const Move move) {
 	return (move >> 6) & 63;
 }
 
 /* Get the promoted piece of a move */
-Piece move_promotion(const Move move) {
+static inline Piece move_promotion(const Move move) {
 	return move >> 12;
 }
 
 /* Convert a move to a string */
-char* move_to_string(const Move move, char *s) {
+static inline char* move_to_string(const Move move, char *s) {
 	static char string[8];
 
 	if (s == NULL) s = string;
@@ -440,8 +396,8 @@ char* move_to_string(const Move move, char *s) {
 }
 
 /* Generate attack index using the magic bitboard or pext approach */
-Bitboard magic_index(const Bitboard pieces, const Attack *attack) {
-#ifdef USE_PEXT
+static inline Bitboard magic_index(const Bitboard pieces, const Attack *attack) {
+#ifdef HAS_PEXT
 	return _pext_u64(pieces, attack->mask);
 #else
 	return ((pieces & attack->mask) * attack->magic) >> attack->shift;
@@ -449,38 +405,38 @@ Bitboard magic_index(const Bitboard pieces, const Attack *attack) {
 }
 
 /* Generate pawn attack (capture) */
-Bitboard pawn_attack(const Square x, const Color c, const Bitboard target) {
+static inline Bitboard pawn_attack(const Square x, const Color c, const Bitboard target) {
 	return MASK[x].pawn_attack[c] & target;
 }
 
 /* Generate knight attack */
-Bitboard knight_attack(const Square x, const Bitboard target) {
+static inline Bitboard knight_attack(const Square x, const Bitboard target) {
 	return MASK[x].knight & target;
 }
 
 /* Generate bishop attack */
-Bitboard bishop_attack(const Bitboard pieces, const Square x, const Bitboard target) {
+static inline Bitboard bishop_attack(const Bitboard pieces, const Square x, const Bitboard target) {
 	return MASK[x].bishop.attack[magic_index(pieces, &MASK[x].bishop)] & target;
 }
 
 /* Generate rook attack */
-Bitboard rook_attack(const Bitboard pieces, const Square x, const Bitboard target) {
+static inline Bitboard rook_attack(const Bitboard pieces, const Square x, const Bitboard target) {
 	return MASK[x].rook.attack[magic_index(pieces, &MASK[x].rook)] & target;
 }
 
 /* Generate king attack */
-Bitboard king_attack(const Square x, const Bitboard target) {
+static inline Bitboard king_attack(const Square x, const Bitboard target) {
 	return MASK[x].king & target;
 }
 
 /* Init key to a random value */
-void key_init(Key *key, Random *r) {
+static inline void key_init(Key *key, Random *r) {
 	key->code = random_get(r);
 	key->index = (uint32_t) random_get(r);
 }
 
 /* Xor a key with another one */
-void key_xor(Key *key, const Key *k) {
+static inline void key_xor(Key *key, const Key *k) {
 	key->code ^= k->code;
 	key->index ^= k->index;
 }
@@ -493,8 +449,8 @@ void key_set(Key *key, const Board *board) {
 	foreach_square (x) {
 		key_xor(key, &KEY_SQUARE[x][board->cpiece[x]]);
 	}
-	key_xor(key, &KEY_CASTLING[board->stack->castling]);
-	key_xor(key, &KEY_ENPASSANT[board->stack->enpassant]);
+	key_xor(key, &KEY_CASTLING[board->castling]);
+	key_xor(key, &KEY_ENPASSANT[board->enpassant]);
 }
 
 /* Update the key after a move is made */
@@ -505,10 +461,9 @@ void key_update(Key *key, const Board *board, const Move move) {
 	Piece p = cpiece_piece(cp);
 	const Color c = cpiece_color(cp);
 	const CPiece victim = board->cpiece[to];
-	const BoardStack *stack = board->stack;
 	Square x, enpassant = ENPASSANT_NONE;
 
-	*key = stack->key;
+	*key = board->key;
 
 	// move the piece
 	key_xor(key, &KEY_SQUARE[from][cp]);
@@ -520,7 +475,7 @@ void key_update(Key *key, const Board *board, const Move move) {
 		if ((p = move_promotion(move))) {
 			key_xor(key, &KEY_SQUARE[to][cp]);
 			key_xor(key, &KEY_SQUARE[to][cpiece_make(p, c)]);
-		} else if (stack->enpassant == to) {
+		} else if (board->enpassant == to) {
 			x = square(file(to), rank(from));
 			key_xor(key, &KEY_SQUARE[x][cpiece_make(PAWN, opponent(c))]);
 		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (board->color[opponent(c)] & board->piece[PAWN]))) enpassant = (from + to) / 2;
@@ -537,9 +492,9 @@ void key_update(Key *key, const Board *board, const Move move) {
 		}
 	}
 	// miscellaneous
-	key_xor(key, &KEY_CASTLING[stack->castling]);
-	key_xor(key, &KEY_CASTLING[stack->castling & MASK_CASTLING[from] & MASK_CASTLING[to]]);
-	key_xor(key, &KEY_ENPASSANT[stack->enpassant]);
+	key_xor(key, &KEY_CASTLING[board->castling]);
+	key_xor(key, &KEY_CASTLING[board->castling & MASK_CASTLING[from] & MASK_CASTLING[to]]);
+	key_xor(key, &KEY_ENPASSANT[board->enpassant]);
 	key_xor(key, &KEY_ENPASSANT[enpassant]);
 	key_xor(key, &KEY_PLAY);
 }
@@ -562,7 +517,7 @@ Bitboard compute_slider_attack(const int x, const Bitboard pieces, const int d[4
 }
 
 /* Initialize some global constants */
-void init(void) {
+void init(const uint64_t seed) {
 	Bitboard o, inside;
 	int r, f, i, j, c;
 	int x, y, z;
@@ -609,15 +564,16 @@ void init(void) {
 
 		for (y = 0; y < 64; ++y) d[x][y] = 0;
 		// directions & between
-		for (i = 0; i < 8; ++i) 
-		for (j = 1; j < 8; ++j) {
-			y = square_safe(f + king_dir[i][0] * j, r + king_dir[i][1] * j);
-			if (y != BOARD_OUT) {
-				d[x][y] = king_dir[i][0] + 8 * king_dir[i][1];
-				mask->direction[y] = abs(d[x][y]);
-				for (z = x + d[x][y]; z != y; z += d[x][y]) mask->between[y] |= square_to_bit(z);
+		for (i = 0; i < 8; ++i) {
+			for (j = 1; j < 8; ++j) {
+				y = square_safe(f + king_dir[i][0] * j, r + king_dir[i][1] * j);
+				if (y != BOARD_OUT) {
+					d[x][y] = king_dir[i][0] + 8 * king_dir[i][1];
+					mask->direction[y] = abs(d[x][y]);
+					for (z = x + d[x][y]; z != y; z += d[x][y]) mask->between[y] |= square_to_bit(z);
+				}
 			}
-		}			
+		}
 
 		// diagonal / antidiagonal / rank / file
 		for (y = x - 9; y >= 0 && d[x][y] == -9; y -= 9) mask->diagonal |= square_to_bit(y);
@@ -650,9 +606,9 @@ void init(void) {
 
 		//magic bishop
 		mask->bishop.mask = (mask->diagonal | mask->antidiagonal) & inside;
-		mask->bishop.shift = 64 - count_moves(mask->bishop.mask);
+		mask->bishop.shift = 64 - stdc_count_ones(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
-		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << count_moves(mask[-1].bishop.mask));
+		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << stdc_count_ones(mask[-1].bishop.mask));
 		o = 0; do {
 			mask->bishop.attack[magic_index(o, &mask->bishop)] = compute_slider_attack(x, o, bishop_dir);
 			o = (o - mask->bishop.mask) & mask->bishop.mask;
@@ -660,9 +616,9 @@ void init(void) {
 
 		// magic rook
 		mask->rook.mask = (mask->rank | mask->file) & inside;
-		mask->rook.shift = 64 - count_moves(mask->rook.mask);
+		mask->rook.shift = 64 - stdc_count_ones(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
-		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << count_moves(mask[-1].rook.mask));
+		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << stdc_count_ones(mask[-1].rook.mask));
 		o = 0; do {
 			mask->rook.attack[magic_index(o, &mask->rook)] = compute_slider_attack(x, o, rook_dir);
 			o = (o - mask->rook.mask) & mask->rook.mask;
@@ -670,7 +626,7 @@ void init(void) {
 	}
 
 	// Hash key
-	random_seed(random, 0xA170EBA);
+	random_seed(random, seed);
 
 	foreach_color (c) key_init(KEY_PLAYER + c, random);
 
@@ -688,12 +644,12 @@ void init(void) {
 }
 
 /* check if an enpassant move is possible */
-bool board_enpassant(const Board *board) {
-	return board->stack->enpassant != ENPASSANT_NONE;
+static inline bool board_enpassant(const Board *board) {
+	return board->enpassant != ENPASSANT_NONE;
 }
 
 /* deplace a piece on the board */
-void board_deplace_piece(Board *board, const Square from, const Square to) {
+static inline void board_deplace_piece(Board *board, const Square from, const Square to) {
 	const Bitboard b = square_to_bit(from) ^ square_to_bit(to);
 	const CPiece cp = board->cpiece[from];
 	const Piece p = cpiece_piece(cp);
@@ -715,8 +671,8 @@ void generate_checkers(Board *board) {
 	const Bitboard pieces = board->color[WHITE] + board->color[BLACK];
 	Bitboard partial_checkers;
 	Bitboard b;
-	Bitboard *pinned = &board->stack->pinned;
-	Bitboard *checkers = &board->stack->checkers;
+	Bitboard *pinned = &board->pinned;
+	Bitboard *checkers = &board->checkers;
 	Square x;
 
 	*pinned = 0;
@@ -762,9 +718,8 @@ void generate_checkers(Board *board) {
 }
 
 /* Clear the board. Set all of its content to zeroes. */
-void board_clear(Board *board) {
+static inline void board_clear(Board *board) {
 	memset(board, 0, sizeof (Board));
-	board->stack = board->stack_;
 }
 
 /* Initialize the board to the starting position. */
@@ -790,15 +745,15 @@ void board_init(Board *board) {
 	board->piece[KING] =   0x1000000000000010ull;
 	board->color[WHITE] =  0x000000000000ffffull;
 	board->color[BLACK] =  0xffff000000000000ull;
-	board->stack->pinned = board->stack->checkers = 0;
-	board->stack->castling = 15;
-	board->stack->enpassant = ENPASSANT_NONE; // illegal enpassant square
+	board->pinned = board->checkers = 0;
+	board->castling = 15;
+	board->enpassant = ENPASSANT_NONE; // illegal enpassant square
 	board->x_king[WHITE] = E1;
 	board->x_king[BLACK] = E8;
 	board->ply = 1;
 	board->player = WHITE;
 
-	key_set(&board->stack->key, board);
+	key_set(&board->key, board);
 }
 
 /* parse a FEN board description */
@@ -843,151 +798,87 @@ void board_set(Board *board, char *string) {
 	if (*s == '-') s++;
 	else {
 		while (*s && *s != ' ') {
-			board->stack->castling |= castling_from_char(*s);
+			board->castling |= castling_from_char(*s);
 			s++;
 		}
 	}
 	// correct castling
 	if (board->cpiece[E1] == WKING) {
-		if (board->cpiece[H1] != WROOK) board->stack->castling &= ~1;
-		if (board->cpiece[A1] != WROOK) board->stack->castling &= ~2;
-	} else board->stack->castling &= ~3;
+		if (board->cpiece[H1] != WROOK) board->castling &= ~1;
+		if (board->cpiece[A1] != WROOK) board->castling &= ~2;
+	} else board->castling &= ~3;
 	if (board->cpiece[E8] == BKING) {
-		if (board->cpiece[H8] != BROOK) board->stack->castling &= ~4;
-		if (board->cpiece[A8] != BROOK) board->stack->castling &= ~8;
-	} else board->stack->castling &= ~12;
+		if (board->cpiece[H8] != BROOK) board->castling &= ~4;
+		if (board->cpiece[A8] != BROOK) board->castling &= ~8;
+	} else board->castling &= ~12;
 	// en passant
-	x = 64;
+	x = ENPASSANT_NONE;
 	s = parse_next(s);
 	if (*s == '-') s++;
 	else if (!square_parse(&s, &x)) parse_error(string, s, "FEN: bad enpassant square");
-	board->stack->enpassant = x;
+	board->enpassant = x;
 	// update other chess board structure
-	key_set(&board->stack->key, board);
+	key_set(&board->key, board);
 	generate_checkers(board);
 }
 
-/* Create a board structure */
-Board* board_create(void) {
-	Board *board = aligned_alloc(64, sizeof (Board));
-	if (board == NULL) memory_error(__func__);
-	board_init(board);
-	return board;
-}
-
-/* Destroy a board structure */
-void board_destroy(Board* board) {
-	free(board);
-}
-
 /* Play a move on the board. */
-void board_update(Board *board, const Move move) {
+void board_copymake(const Board *board, const Move move, const Key *key, Board *next) {
 	const Square from = move_from(move);
 	const Square to = move_to(move);
+	const Square enpassant = board->enpassant;
 	CPiece cp = board->cpiece[from];
 	Piece p = cpiece_piece(cp);
 	const Color c = cpiece_color(cp);
 	const Bitboard b_from = square_to_bit(from);
 	const Bitboard b_to = square_to_bit(to);
 	const CPiece victim = board->cpiece[to];
-	const BoardStack *current = board->stack;
-	BoardStack *next = board->stack + 1;
 	Square x;
 	Bitboard b;
 
+	*next = *board;
+
 	// update chess board informations
-	next->castling = current->castling;
-	next->enpassant = 64;
-	next->victim = 0;
+	next->enpassant = ENPASSANT_NONE;
 	next->castling &= MASK_CASTLING[from] & MASK_CASTLING[to];
 	// move the piece
-	board->piece[p] ^= b_from;
-	board->piece[p] ^= b_to;
-	board->color[c] ^= b_from | b_to;
-	board->cpiece[from] = EMPTY;
-	board->cpiece[to] = cp;
+	next->piece[p] ^= b_from;
+	next->piece[p] ^= b_to;
+	next->color[c] ^= b_from | b_to;
+	next->cpiece[from] = EMPTY;
+	next->cpiece[to] = cp;
 	// capture
 	if (victim) {
-		board->piece[cpiece_piece(victim)] ^= b_to;
-		board->color[cpiece_color(victim)] ^= b_to;
-		next->victim = victim;
+		next->piece[cpiece_piece(victim)] ^= b_to;
+		next->color[cpiece_color(victim)] ^= b_to;
 	}
 	// special pawn move
 	if (p == PAWN) {
 		if ((p = move_promotion(move))) {
 			cp = cpiece_make(p, c);
-			board->piece[PAWN] ^= b_to;
-			board->piece[p] ^= b_to;
-			board->cpiece[to] = cp;
-		} else if (current->enpassant == to) {
+			next->piece[PAWN] ^= b_to;
+			next->piece[p] ^= b_to;
+			next->cpiece[to] = cp;
+		} else if (enpassant == to) {
 			x = square(file(to), rank(from));
 			b = square_to_bit(x);
-			board->piece[PAWN] ^= b;
-			board->color[opponent(c)] ^= b;
-			board->cpiece[x] = EMPTY;
-		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (board->color[opponent(c)] & board->piece[PAWN]))) {
+			next->piece[PAWN] ^= b;
+			next->color[opponent(c)] ^= b;
+			next->cpiece[x] = EMPTY;
+		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (next->color[opponent(c)] & next->piece[PAWN]))) {
 			next->enpassant = (from + to) / 2;
 		}
 	// king move
 	} else if (p == KING) {
-		board->x_king[c] = to;
-		if (to == from + 2) board_deplace_piece(board, from + 3, from + 1);
-		else if (to == from - 2) board_deplace_piece(board, from - 4, from - 1);
+		next->x_king[c] = to;
+		if (to == from + 2) board_deplace_piece(next, from + 3, from + 1);
+		else if (to == from - 2) board_deplace_piece(next, from - 4, from - 1);
 	}
 
-	++board->stack;
-	++board->ply;
-	board->player = opponent(board->player);
-
-	generate_checkers(board);
-}
-
-/* Undo a move from the board.*/
-void board_restore(Board *board, const Move move) {
-	const Square from = move_from(move);
-	const Square to = move_to(move);
-	CPiece cp = board->cpiece[to];
-	Piece p = cpiece_piece(cp);
-	const Color c = cpiece_color(cp);
-	const Bitboard b_from = square_to_bit(from);
-	const Bitboard b_to = square_to_bit(to);
-	const CPiece victim = board->stack->victim;
-
-	// miscellaneous
-	--board->stack;
-	--board->ply;
-	board->player = opponent(board->player);
-
-	// move the piece (with promotion)
-	board->piece[p] ^= b_to;
-	if (move_promotion(move)) {
-		p = PAWN;
-		cp = cpiece_make(PAWN, c);
-	}
-	board->piece[p] ^= b_from;
-	board->color[c] ^= b_from | b_to;
-	board->cpiece[to] = EMPTY;
-	board->cpiece[from] = cp;
-	// capture
-	if (victim) {
-		board->piece[cpiece_piece(victim)] ^= b_to;
-		board->color[cpiece_color(victim)] ^= b_to;
-		board->cpiece[to] = victim;
-	}
-	// enpassant capture
-	if (p == PAWN && board->stack->enpassant == to) {
-		const Square x = square(file(to), rank(from));
-		const Bitboard b = square_to_bit(x);
-		board->piece[PAWN] ^= b;
-		board->color[opponent(c)] ^= b;
-		board->cpiece[x] = cpiece_make(PAWN, opponent(c));
-	}
-	// king move
-	if (p == KING) {
-		board->x_king[c] = from;
-		if (to == from + 2) board_deplace_piece(board, from + 1, from + 3);
-		else if (to == from - 2) board_deplace_piece(board, from - 1, from - 4);
-	}
+	++next->ply;
+	next->player = opponent(next->player);
+	next->key = *key;
+	generate_checkers(next);
 }
 
 /* Print the board. */
@@ -996,24 +887,25 @@ void board_print(const Board *board, FILE *output) {
 	int f, r;
 	const char p[] = ".PpNnBbRrQqKk#";
 	const char c[] = "wb";
-	const Square ep = board->stack->enpassant;
+	const Square ep = board->enpassant;
 
 	fputs("  a b c d e f g h\n", output);
-	for (r = 7; r >= 0; --r)
-	for (f = 0; f <= 7; ++f) {
-		x = square(f, r);
-		if (f == 0) fprintf(output, "%1d ", r + 1);
-		fputc(p[board->cpiece[x]], output); fputc(' ', output);
-		if (f == 7) fprintf(output, "%1d\n", r + 1);
+	for (r = 7; r >= 0; --r) {
+		for (f = 0; f <= 7; ++f) {
+			x = square(f, r);
+			if (f == 0) fprintf(output, "%1d ", r + 1);
+			fputc(p[board->cpiece[x]], output); fputc(' ', output);
+			if (f == 7) fprintf(output, "%1d\n", r + 1);
+		}
 	}
 	fputs("  a b c d e f g h\n", output);
 	fprintf(output, "%c, ", c[board->player]);
-	if (board->stack->castling & CAN_CASTLE_KINGSIDE[WHITE]) fputc('K', output);
-	if (board->stack->castling & CAN_CASTLE_QUEENSIDE[WHITE]) fputc('Q', output);
-	if (board->stack->castling & CAN_CASTLE_KINGSIDE[BLACK]) fputc('k', output);
-	if (board->stack->castling & CAN_CASTLE_QUEENSIDE[BLACK]) fputc('q', output);
+	if (board->castling & CAN_CASTLE_KINGSIDE[WHITE]) fputc('K', output);
+	if (board->castling & CAN_CASTLE_QUEENSIDE[WHITE]) fputc('Q', output);
+	if (board->castling & CAN_CASTLE_KINGSIDE[BLACK]) fputc('k', output);
+	if (board->castling & CAN_CASTLE_QUEENSIDE[BLACK]) fputc('q', output);
 	if (board_enpassant(board))	fprintf(output, ", ep: %c%c", file(ep) + 'a', rank(ep) + '1');
-	fprintf(output, "\n");
+	fputc('\n', output);
 }
 
 
@@ -1030,13 +922,13 @@ bool board_is_square_attacked(const Board *board, const Square x, const Color c)
 }
 
 /* Append a move to an array of moves */
-Move* push_move(Move *move, const Square from, const Square to) {
+static inline Move* push_move(Move *move, const Square from, const Square to) {
 	*move++ = from | (to << 6);
 	return move;
 }
 
 /* Append promotions from the same move */
-Move* push_promotion(Move *move, const Square from, const Square to) {
+static inline Move* push_promotion(Move *move, const Square from, const Square to) {
 	const Move m = from | (to << 6);
 
 	*move++ = m | QUEEN_PROMOTION;
@@ -1086,9 +978,9 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
 	const Bitboard bq = board->piece[BISHOP] | board->piece[QUEEN];
 	const Bitboard rq = board->piece[ROOK] | board->piece[QUEEN];
-	const Bitboard pinned = board->stack->pinned;
+	const Bitboard pinned = board->pinned;
 	const Bitboard unpinned = board->color[c] & ~pinned;
-	const Bitboard checkers = board->stack->checkers;
+	const Bitboard checkers = board->checkers;
 	const Square k = board->x_king[c];
 	const int pawn_left = PUSH[c] - 1;
 	const int pawn_right = PUSH[c] + 1;
@@ -1103,7 +995,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 
 	// in check: capture or block the (single) checker if any;
 	if (checkers) {
-		if (is_single(checkers)) {
+		if (stdc_has_single_bit(checkers)) {
 			x_checker = square_first(checkers);
 			empty = MASK[k].between[x_checker];
 			enemy = checkers;
@@ -1116,13 +1008,13 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 		target = enemy; if (do_quiet) target |= empty;
 		// castling
 		if (do_quiet) {
-			if ((board->stack->castling & CAN_CASTLE_KINGSIDE[c])
+			if ((board->castling & CAN_CASTLE_KINGSIDE[c])
 				&& (occupied & MASK[k].between[k + 3]) == 0
 				&& !board_is_square_attacked(board, k + 1, o)
 				&& !board_is_square_attacked(board, k + 2, o)) {
 					if (generate) move = push_move(move, k, k + 2); else ++count;
 			}
-			if ((board->stack->castling & CAN_CASTLE_QUEENSIDE[c])
+			if ((board->castling & CAN_CASTLE_QUEENSIDE[c])
 				&& (occupied & MASK[k].between[k - 4]) == 0
 				&& !board_is_square_attacked(board, k - 1, o)
 				&& !board_is_square_attacked(board, k - 2, o)) {
@@ -1157,7 +1049,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 			attack = 0;
 			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
 			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			if (generate) move = push_moves(move, attack, from); else count += count_moves(attack);
+			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
 		}
 		// rook or queen (pinned)
 		piece = rq & pinned;
@@ -1165,9 +1057,9 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 			from = square_next(&piece);
 			d = dir[from];
 			attack = 0;
-			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank); 
+			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
 			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			if (generate) move = push_moves(move, attack, from); else count += count_moves(attack);			
+			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
 		}
 	}
 	// common moves
@@ -1175,8 +1067,8 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	target = enemy; if (do_quiet) target |= empty;
 
 	// enpassant capture
-	if (board_enpassant(board) && (!checkers || x_checker == board->stack->enpassant - pawn_push)) {
-		to = board->stack->enpassant;
+	if (board_enpassant(board) && (!checkers || x_checker == board->enpassant - pawn_push)) {
+		to = board->enpassant;
 		ep = to - pawn_push;
 		from = ep - 1;
 		if (file(to) > 0 && board->cpiece[from] == cpiece_make(PAWN, c)) {
@@ -1200,32 +1092,32 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_left);
 		move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_left);
-	} else count += 4 * count_moves(attack & PROMOTION_RANK[c]) + count_moves(attack & ~PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]) + stdc_count_ones(attack & ~PROMOTION_RANK[c]);
 
 	attack = (c ? (piece & ~COLUMN[7]) >> 7 : (piece & ~COLUMN[7]) << 9) & enemy;
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_right);
 		move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_right);
-	} else count += 4 * count_moves(attack & PROMOTION_RANK[c]) + count_moves(attack & ~PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]) + stdc_count_ones(attack & ~PROMOTION_RANK[c]);
 
 	attack = (c ? piece >> 8 : piece << 8) & empty;
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_push);
-	} else count += 4 * count_moves(attack & PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]);
 	if (do_quiet) {
 		if (generate) {
 			move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_push);
-		} else count += count_moves(attack & ~PROMOTION_RANK[c]);
+		} else count += stdc_count_ones(attack & ~PROMOTION_RANK[c]);
 		attack = (c ? (((piece & RANK[6]) >> 8) & ~occupied) >> 8 : (((piece & RANK[1]) << 8) & ~occupied) << 8) & empty;
-		if (generate) move = push_pawn_moves(move, attack, 2 * pawn_push); else count += count_moves(attack);
+		if (generate) move = push_pawn_moves(move, attack, 2 * pawn_push); else count += stdc_count_ones(attack);
 	}
-	
+
 	// knight
 	piece = board->piece[KNIGHT] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
 		attack = knight_attack(from, target);
-		if (generate) move = push_moves(move, attack, from); else count += count_moves(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
 	}
 
 	// bishop or queen
@@ -1233,7 +1125,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	while (piece) {
 		from = square_next(&piece);
 		attack = bishop_attack(occupied, from, target);
-		if (generate) move = push_moves(move, attack, from); else count += count_moves(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
 	}
 
 	// rook or queen
@@ -1241,7 +1133,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	while (piece) {
 		from = square_next(&piece);
 		attack = rook_attack(occupied, from, target);
-		if (generate) move = push_moves(move, attack, from); else count += count_moves(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
 	}
 
 	// king
@@ -1262,30 +1154,26 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 }
 
 /* Generate all legal moves or captures */
-void movearray_generate(MoveArray *ma, Board *board,  const bool do_quiet) {
+static inline void movearray_generate(MoveArray *ma, Board *board,  const bool do_quiet) {
 	ma->i = 0;
 	ma->n = generate_moves(board, ma->move, true, do_quiet);
 	ma->move[ma->n] = 0;
 }
 
 /* Get next move */
-Move movearray_next(MoveArray *ma) {
+static inline Move movearray_next(MoveArray *ma) {
 	return ma->move[ma->i++];
 }
 
-/* Hash initialisation */
-HashTable* hash_create(const int b) {
-	const size_t n = 1ULL << b;
-	size_t i;
-	const Hash hash_init = {0, 0, 0};
+/* Hash creation */
+HashTable* hash_create(const size_t size) {
+	const size_t n = stdc_bit_floor(size << 20) / sizeof(Hash);
 
 	HashTable *hashtable = malloc(sizeof (HashTable));
 	if (hashtable == NULL) memory_error(__func__);
-	hashtable->hash = aligned_alloc(64, (n + BUCKET_SIZE) * sizeof (Hash));
+	hashtable->hash = aligned_alloc(32, (n + BUCKET_SIZE) * sizeof (Hash));
 	if (hashtable->hash == NULL) memory_error(__func__);
-	hashtable->mask = (n - 1) & ~3;
-
-	for (i = 0; i <= hashtable->mask + BUCKET_SIZE; ++i) hashtable->hash[i] = hash_init;
+	hashtable->mask = n - 1;
 
 	return hashtable;
 }
@@ -1294,6 +1182,11 @@ HashTable* hash_create(const int b) {
 void hash_destroy(HashTable *hashtable) {
 	if (hashtable) free(hashtable->hash);
 	free(hashtable);
+}
+
+/* Hash clear */
+static inline void hash_clear(HashTable *hashtable) {
+	memset(hashtable->hash, 0, (hashtable->mask + BUCKET_SIZE + 1) * sizeof(Hash));
 }
 
 /* Hash probe */
@@ -1322,48 +1215,49 @@ void hash_store(const HashTable *hashtable, const Key *key, const int depth, con
 }
 
 /* Prefetch */
-void hash_prefetch(HashTable *hashtable, const Key *key) {
-	#if defined(USE_GCC_X64)
+static inline void hash_prefetch(HashTable *hashtable, const Key *key) {
+	#if defined(__GNUC__)
 		__builtin_prefetch(hashtable->hash + (key->index & hashtable->mask));
 	#endif
 }
 
 /* Recursive Perft with optional hashtable, bulk counting & capture only generation */
 uint64_t perft(Board *board, HashTable *hashtable, const int depth, const bool bulk, const bool do_quiet) {
+	Board next;
 	uint64_t count = 0, hash_count;
 	Move move;
-	MoveArray ma[1];
+	MoveArray ma;
 	const bool use_hash = (hashtable && depth > 2);
-	Key *key = &board->stack[1].key;
+	Key key;
 
-	movearray_generate(ma, board, do_quiet || board->stack->checkers);
+	movearray_generate(&ma, board, do_quiet || board->checkers);
 
-	while ((move = movearray_next(ma)) != 0) {
+	while ((move = movearray_next(&ma)) != 0) {
 		if (use_hash) {
-			key_update(key, board, move);
-			hash_prefetch(hashtable, key);
+			key_update(&key, board, move);
+			hash_prefetch(hashtable, &key);
 		}
-		board_update(board, move);
-			if (depth == 1) ++count;
-			else if (bulk && depth == 2) count += generate_moves(board, NULL, false, do_quiet || board->stack->checkers);
-			else {
-				if (use_hash) {
-					hash_count = hash_probe(hashtable, key, depth - 1);
-					if (hash_count == 0) {
-						hash_count = perft(board, hashtable, depth - 1, bulk, do_quiet);
-						hash_store(hashtable, key, depth - 1, hash_count);
-					}
-					count += hash_count;
-				} else count += perft(board, hashtable, depth - 1, bulk, do_quiet);
-			}
-		board_restore(board, move);
+		board_copymake(board, move, &key, &next);
+		if (depth == 1) ++count;
+		else if (bulk && depth == 2) count += generate_moves(&next, NULL, false, do_quiet || next.checkers);
+		else {
+			if (use_hash) {
+				hash_count = hash_probe(hashtable, &key, depth - 1);
+				if (hash_count == 0) {
+					hash_count = perft(&next, hashtable, depth - 1, bulk, do_quiet);
+					hash_store(hashtable, &key, depth - 1, hash_count);
+				}
+				count += hash_count;
+			} else count += perft(&next, hashtable, depth - 1, bulk, do_quiet);
+		}
 	}
 
 	return count;
 }
 
 /* test */
-void test(Board *board) {
+void test(void) {
+	Board board;
 	typedef struct TestBoard {
 		char *comments, *fen;
 		unsigned long long result;
@@ -1395,70 +1289,77 @@ void test(Board *board) {
 	printf("Testing the board generator\n");
 	for (TestBoard *t = tests; t->fen != NULL; ++t) {
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
-		board_set(board, t->fen);
-		unsigned long long count = perft(board, NULL, t->depth, true, true);
+		board_set(&board, t->fen);
+		unsigned long long count = perft(&board, NULL, t->depth, true, true);
 		if (count == t->result) printf(" passed\n"); else printf(" FAILED ! %llu != %llu\n", count, t->result);
 	}
 }
 
 /* main */
 int main(int argc, char **argv) {
-	double time = -chrono(), partial = 0.0;
-	Board *board;
+	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
+	Board board, next;
 	HashTable *hashtable = NULL;
-	Move move;
-	MoveArray ma[1];
+	Key key;
+	MoveArray ma;
 	unsigned long long count, total = 0;
-	int i, d, depth = 6, hash_size = 0;
-	bool div = false, capture = false, bulk = false, loop = false;
+	uint64_t seed = 0xA170EBA;
 	char *fen = NULL;
+	int depth = 6, hash_size = 0, n_repetition = 1;
+	Move move;
+	bool div = false, capture = false, bulk = false, loop = false;
 
-	puts("Magic Perft (c) version 1.1 Richard Delorme - 2020");
-#if USE_PEXT
+	puts("Magic Perft (c) version 2.0 Richard Delorme - 2026");
+#if HAS_PEXT
 	puts("Bitboard move generation based on magic (pext) bitboards");
 #else
 	puts("Bitboard move generation based on magic bitboards");
 #endif
 
-	// pre-initialisation
-	init();
-	board = board_create();
 
 	// argument
-	for (i = 1; i < argc; ++i) {
+	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
+		else if (!strcmp(argv[i], "--kiwipete") || !strcmp(argv[i], "-k")) fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
 		else if (!strcmp(argv[i], "--depth") || !strcmp(argv[i], "-d")) depth = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--bulk") || !strcmp(argv[i], "-b")) bulk = true;
-		else if (!strcmp(argv[i], "--div") || !strcmp(argv[i], "-r")) div = true;
+		else if (!strcmp(argv[i], "--div")) div = true;
 		else if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "-c")) capture = true;
 		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
-		else if (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-H")) hash_size = atoi(argv[++i]);
 		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
+		else if (i < argc - 1 && (!strcmp(argv[i], "--repeat") || !strcmp(argv[i], "-r"))) n_repetition=atoi(argv[++i]);
+		else if (i < argc - 1 && (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-h"))) hash_size = atoi(argv[++i]);
+		else if (i < argc - 1 && (!strcmp(argv[i], "--seed") || !strcmp(argv[i], "-s"))) seed = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
-			test(board);
-			board_destroy(board);
+			init(seed);
+			test();
 			return 0;
 		} else {
-			printf("%s [--fen|-f <fen>] [--depth|-d <depth>] [--hash|-H <size>] [--bulk|-b] [--div] [--capture] | [--help|-h] | [--test|-t]\n", argv[0]);
-			puts("Enumerate moves.");
-			puts("\t--help|-h            Print this message.");
-			puts("\t--fen|-f <fen>       Test the position indicated in FEN format (default=starting position).");
+			printf("%s <args> \n", argv[0]);
+			puts("Enumerate moves. The following options are available:");
+			puts("\t--help|-?            Print this message.");
+			puts("\t--fen|-f <fen>       Use the position indicated in FEN format (default=starting position).");
+			puts("\t--kiwipete|-k        Use the kiwipete position.");
 			puts("\t--depth|-d <depth>   Test up to this depth (default=6).");
 			puts("\t--bulk|-b            Do fast bulk counting at the last ply.");
-			puts("\t--hash|-H <size>     Use a hashtable with <size> bits entries (default 0, no hashtable).");
+			puts("\t--hash|-h <size>     Use a hashtable with <size> Megabytes (default 0, no hashtable).");
 			puts("\t--capture|-c         Generate only captures, promotions & check evasions.");
+			puts("\t--div                Print a node count for each move.");
+			puts("\t--seed|-s <seed>     Change the seed of the pseudo move generator to <seed>.");
 			puts("\t--loop|-l            Loop from depth 1 to <depth>.");
-			puts("\t--div|-r             Print a node count for each move.");
+			puts("\t--repeat|-r <n>      Repeat the test <n> time (default = 1).");
 			puts("\t--test|-t            Run an internal test to check the move generator.");
 			return 0;
 		}
 	}
-	
+
 	// post-initialisation
-	if (hash_size > 32) hash_size = 32;
+	init(seed);
+	board_init(&board);
 	if (hash_size > 0) hashtable = hash_create(hash_size);
-	if (fen) board_set(board, fen);
+	if (fen) board_set(&board, fen);
 	if (depth < 1) depth = 1;
+	if (n_repetition < 1) n_repetition = 1;
 
 	printf("Perft setting: ");
 	if (hash_size == 0) printf("no hashing; ");
@@ -1466,37 +1367,44 @@ int main(int argc, char **argv) {
 	if (bulk) printf("with"); else printf("no"); printf(" bulk counting;");
 	if (capture) printf(" capture only;");
 	puts("");
-	board_print(board, stdout);
+	board_print(&board, stdout);
 
 	// root search
 	if (div) {
-		movearray_generate(ma, board, !capture || board->stack->checkers);
-		while ((move = movearray_next(ma)) != 0) {
-			board_update(board, move);
-				if (depth == 1) count = 1;
-				else if (bulk && depth == 2) count = generate_moves(board, NULL, false, !capture || board->stack->checkers);
-				else count = perft(board, hashtable, depth - 1, bulk, !capture);
-				total += count;
-				printf("%5s %16llu\n", move_to_string(move, NULL), count);
-			board_restore(board, move);
+		movearray_generate(&ma, &board, !capture || board.checkers);
+		while ((move = movearray_next(&ma)) != 0) {
+			partial_time = -chrono();
+			key_update(&key, &board, move);
+			board_copymake(&board, move, &key, &next);
+			if (depth == 1) count = 1;
+			else if (bulk && depth == 2) count = generate_moves(&next, NULL, false, !capture || next.checkers);
+			else count = perft(&next, hashtable, depth - 1, bulk, !capture);
+			total += count;
+			partial_time += chrono();
+			total_time += partial_time;
+			printf("%5s %16llu leaves in %10.3f s %12.0f leaves/s\n", move_to_string(move, NULL), count, partial_time, count / partial_time);
 		}
 	} else {
-		for (d = (loop ? 1 : depth); d <= depth; ++d) {
-			partial = -chrono();
-			count = perft(board, hashtable, d, bulk, !capture);
-			total += count;
-			partial += chrono();
-			printf("perft %2d : %15llu leaves in %10.3f s %12.0f leaves/s\n", d, count, partial, count / partial);
+		for (int r = 1; r <= n_repetition; ++r) {
+			for (int d = (loop ? 1 : depth); d <= depth; ++d) {
+				if (hashtable) hash_clear(hashtable);
+				partial_time = -chrono();
+				count = perft(&board, hashtable, d, bulk, !capture);
+				total += count;
+				partial_time += chrono();
+				total_time += partial_time;
+				printf("perft %2d : %15llu leaves in %10.3f s %12.0f leaves/s\n", d, count, partial_time, count / partial_time);
+			}
 		}
 	}
-	time += chrono();
-	if (div || loop) printf("total    : %15llu leaves in %10.3f s %12.0f leaves/s\n", total, time, total / time);
+	if (div || loop || n_repetition > 1) printf("total    : %15llu leaves in %10.3f s %12.0f leaves/s\n", total, total_time, total / total_time);
 
-	board_destroy(board);
 	hash_destroy(hashtable);
 	free(MASK->bishop.attack);
 	free(MASK->rook.attack);
 
+	full_time += chrono();
+	printf("full time: %10.3f s\n", full_time);
+
 	return 0;
 }
-
