@@ -9,9 +9,7 @@
  */
 
 /* Includes */
-#include <bits/time.h>
 #include <ctype.h>
-#include <stdbit.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -24,11 +22,38 @@
 #include <sys/time.h>
 #endif
 
-#if defined(_MSC_VER)
+#if defined(_WIN64)
 	#include <intrin.h>
+	#include <windows.h>
 #elif defined(__x86_64__)
 	#include <x86intrin.h>
 #endif
+
+#ifndef _WIN64
+	#include <stdbit.h>
+#else
+	/* As usual Microsoft does not follow standard :-( */
+	static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) {
+		return __popcnt64(x);
+	}
+	
+	static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) {
+		return _mm_tzcnt_64(x);
+	}
+	
+	static inline bool stdc_has_single_bit_ull(const unsigned long long x) {
+		return x && !(x & (x - 1));
+	}
+ 
+	static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) {
+		return x ? 1 << (63 - __lzcnt64(x)) : x;
+	}
+ 
+	static inline void* aligned_alloc(size_t alignment, size_t size) {
+		return _aligned_malloc(size, alignment);
+	}
+ 
+#endif	
 
 /* fast PEXT availability */
 #if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
@@ -301,7 +326,7 @@ static inline bool square_parse(char **string, Square *x) {
 
 /* Get the first occupied square from a bitboard */
 static inline Square square_first(Bitboard b) {
-	return stdc_trailing_zeros_ul(b);
+	return stdc_trailing_zeros_ull(b);
 }
 
 /* Get the next occupied square from a bitboard */
@@ -606,9 +631,9 @@ void init(const uint64_t seed) {
 
 		//magic bishop
 		mask->bishop.mask = (mask->diagonal | mask->antidiagonal) & inside;
-		mask->bishop.shift = 64 - stdc_count_ones(mask->bishop.mask);
+		mask->bishop.shift = 64 - stdc_count_ones_ull(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
-		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << stdc_count_ones(mask[-1].bishop.mask));
+		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << stdc_count_ones_ull(mask[-1].bishop.mask));
 		o = 0; do {
 			mask->bishop.attack[magic_index(o, &mask->bishop)] = compute_slider_attack(x, o, bishop_dir);
 			o = (o - mask->bishop.mask) & mask->bishop.mask;
@@ -616,9 +641,9 @@ void init(const uint64_t seed) {
 
 		// magic rook
 		mask->rook.mask = (mask->rank | mask->file) & inside;
-		mask->rook.shift = 64 - stdc_count_ones(mask->rook.mask);
+		mask->rook.shift = 64 - stdc_count_ones_ull(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
-		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << stdc_count_ones(mask[-1].rook.mask));
+		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << stdc_count_ones_ull(mask[-1].rook.mask));
 		o = 0; do {
 			mask->rook.attack[magic_index(o, &mask->rook)] = compute_slider_attack(x, o, rook_dir);
 			o = (o - mask->rook.mask) & mask->rook.mask;
@@ -995,7 +1020,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 
 	// in check: capture or block the (single) checker if any;
 	if (checkers) {
-		if (stdc_has_single_bit(checkers)) {
+		if (stdc_has_single_bit_ull(checkers)) {
 			x_checker = square_first(checkers);
 			empty = MASK[k].between[x_checker];
 			enemy = checkers;
@@ -1049,7 +1074,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 			attack = 0;
 			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
 			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
+			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones_ull(attack);
 		}
 		// rook or queen (pinned)
 		piece = rq & pinned;
@@ -1059,7 +1084,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 			attack = 0;
 			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
 			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
+			if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones_ull(attack);
 		}
 	}
 	// common moves
@@ -1092,24 +1117,24 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_left);
 		move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_left);
-	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]) + stdc_count_ones(attack & ~PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]) + stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
 
 	attack = (c ? (piece & ~COLUMN[7]) >> 7 : (piece & ~COLUMN[7]) << 9) & enemy;
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_right);
 		move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_right);
-	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]) + stdc_count_ones(attack & ~PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]) + stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
 
 	attack = (c ? piece >> 8 : piece << 8) & empty;
 	if (generate) {
 		move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_push);
-	} else count += 4 * stdc_count_ones(attack & PROMOTION_RANK[c]);
+	} else count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]);
 	if (do_quiet) {
 		if (generate) {
 			move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_push);
-		} else count += stdc_count_ones(attack & ~PROMOTION_RANK[c]);
+		} else count += stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
 		attack = (c ? (((piece & RANK[6]) >> 8) & ~occupied) >> 8 : (((piece & RANK[1]) << 8) & ~occupied) << 8) & empty;
-		if (generate) move = push_pawn_moves(move, attack, 2 * pawn_push); else count += stdc_count_ones(attack);
+		if (generate) move = push_pawn_moves(move, attack, 2 * pawn_push); else count += stdc_count_ones_ull(attack);
 	}
 
 	// knight
@@ -1117,7 +1142,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	while (piece) {
 		from = square_next(&piece);
 		attack = knight_attack(from, target);
-		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones_ull(attack);
 	}
 
 	// bishop or queen
@@ -1125,7 +1150,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	while (piece) {
 		from = square_next(&piece);
 		attack = bishop_attack(occupied, from, target);
-		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones_ull(attack);
 	}
 
 	// rook or queen
@@ -1133,7 +1158,7 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	while (piece) {
 		from = square_next(&piece);
 		attack = rook_attack(occupied, from, target);
-		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones(attack);
+		if (generate) move = push_moves(move, attack, from); else count += stdc_count_ones_ull(attack);
 	}
 
 	// king
@@ -1167,7 +1192,7 @@ static inline Move movearray_next(MoveArray *ma) {
 
 /* Hash creation */
 HashTable* hash_create(const size_t size) {
-	const size_t n = stdc_bit_floor(size << 20) / sizeof(Hash);
+	const size_t n = stdc_bit_floor_ull(size << 20) / sizeof(Hash);
 
 	HashTable *hashtable = malloc(sizeof (HashTable));
 	if (hashtable == NULL) memory_error(__func__);
@@ -1216,9 +1241,7 @@ void hash_store(const HashTable *hashtable, const Key *key, const int depth, con
 
 /* Prefetch */
 static inline void hash_prefetch(HashTable *hashtable, const Key *key) {
-	#if defined(__GNUC__)
-		__builtin_prefetch(hashtable->hash + (key->index & hashtable->mask));
-	#endif
+	_mm_prefetch((const char*) (hashtable->hash + (key->index & hashtable->mask)), _MM_HINT_T2);
 }
 
 /* Recursive Perft with optional hashtable, bulk counting & capture only generation */
