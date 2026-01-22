@@ -22,38 +22,36 @@
 #include <sys/time.h>
 #endif
 
-#if defined(_WIN64)
+#if defined(_WIN32)
 	#include <intrin.h>
-	#include <windows.h>
 #elif defined(__x86_64__)
 	#include <x86intrin.h>
 #endif
 
-#ifndef _WIN64
-	#include <stdbit.h>
-#else
-	/* As usual Microsoft does not follow standard :-( */
+/* As usual Microsoft does not follow standard :-( */
+#if defined(_MSC_VER)&& !defined(__POCC__)
 	static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) {
 		return __popcnt64(x);
 	}
-	
+
 	static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) {
 		return _mm_tzcnt_64(x);
 	}
-	
+
 	static inline bool stdc_has_single_bit_ull(const unsigned long long x) {
 		return x && !(x & (x - 1));
 	}
- 
+
 	static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) {
-		return x ? 1 << (63 - __lzcnt64(x)) : x;
+		return x ? 1ull << (63 - __lzcnt64(x)) : x;
 	}
- 
+
 	static inline void* aligned_alloc(size_t alignment, size_t size) {
 		return _aligned_malloc(size, alignment);
 	}
- 
-#endif	
+#else
+	#include <stdbit.h>
+#endif
 
 /* fast PEXT availability */
 #if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
@@ -149,8 +147,7 @@ typedef struct MoveArray {
 
 typedef struct {
 	uint64_t code;
-	uint64_t count:56;
-	int depth:8;
+	uint64_t data;
 } Hash;
 
 typedef struct {
@@ -196,6 +193,8 @@ Key KEY_PLAY;
 Bitboard bit_bswap(Bitboard b) {
 #if defined(_MSC_VER)
 	return _byteswap_uint64(b);
+#elif defined(__POCC__)
+	return _bswap64(b);
 #elif defined(__GNUC__)
 	return __builtin_bswap64(b);
 #else
@@ -219,6 +218,7 @@ double chrono(void) {
 			return 0.000001 * t.tv_usec + t.tv_sec;
 		#endif
 	#elif defined(_WIN32)
+		int GetTickCount(void);
 		return 0.001 * GetTickCount();
 	#endif
 }
@@ -231,7 +231,7 @@ void memory_error(const char *function) {
 
 /* Parse error. */
 void parse_error(const char *string, const char *done, const char *msg) {
-	int n;
+	size_t n;
 
 	fprintf(stderr, "\nError in %s '%s'\n", msg, string);
 	n = 11 + strlen(msg) + done - string;
@@ -1219,7 +1219,7 @@ uint64_t hash_probe(const HashTable *hashtable, const Key *key, const int depth)
 	Hash *hash = hashtable->hash + (key->index & hashtable->mask);
 
 	for (int i = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && hash[i].depth == depth) return hash[i].count;
+		if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) return hash[i].data >> 6;
 	}
 	return 0;
 }
@@ -1227,16 +1227,16 @@ uint64_t hash_probe(const HashTable *hashtable, const Key *key, const int depth)
 /* Hash store */
 void hash_store(const HashTable *hashtable, const Key *key, const int depth, const uint64_t count) {
 	Hash *hash = (hashtable->hash + (key->index & hashtable->mask));
+	const uint64_t data = count << 6 | depth;
 	int i, j;
 
 	for (i = j = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && hash[i].depth == depth) return;
-		if (hash[i].depth < hash[j].depth) j = i;
+		if (hash[i].code == key->code && hash[i].data == data) return;
+		if (hash[i].data < hash[j].data) j = i;
 	}
 
 	hash[j].code = key->code;
-	hash[j].depth = depth;
-	hash[j].count = count;
+	hash[j].data = data;
 }
 
 /* Prefetch */
@@ -1321,7 +1321,7 @@ void test(void) {
 /* main */
 int main(int argc, char **argv) {
 	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
-	Board board, next;
+	alignas(64) Board board, next;
 	HashTable *hashtable = NULL;
 	Key key;
 	MoveArray ma;
@@ -1382,11 +1382,12 @@ int main(int argc, char **argv) {
 	if (hash_size > 0) hashtable = hash_create(hash_size);
 	if (fen) board_set(&board, fen);
 	if (depth < 1) depth = 1;
+	if (depth > 64) depth = 64;
 	if (n_repetition < 1) n_repetition = 1;
 
 	printf("Perft setting: ");
 	if (hash_size == 0) printf("no hashing; ");
-	else printf("hashtable size: %u Mbytes; ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20));
+	else printf("hashtable size: %u Mbytes (%llu entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), (unsigned long long) (hashtable->mask + BUCKET_SIZE + 1));
 	if (bulk) printf("with"); else printf("no"); printf(" bulk counting;");
 	if (capture) printf(" capture only;");
 	puts("");
