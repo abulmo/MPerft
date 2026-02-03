@@ -80,7 +80,7 @@ pgo :
 	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 6 -q;
 	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b -q;
 	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 8 -b -h 256 -q;
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b -t 4 -q;
+	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 6 -b -t 4 -q;
 	$(PGO_MERGE)
 	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(BIN)/$(EXE) $(LIBS)
 
