@@ -9,6 +9,7 @@
  */
 
 /* includes */
+#include <assert.h>
 #include <ctype.h>
 #include <float.h>
 #include <stdatomic.h>
@@ -445,6 +446,7 @@ static inline Square file(const Square x) {
  * @return Bitboard with one bit set
  */
 static inline Bitboard square_to_bit(const int x) {
+	assert(0 <= x && x < 64);
 	return 1ULL << x;
 }
 
@@ -1933,9 +1935,9 @@ uint64_t perft(Board *board, HashTable *hashtable, TaskPool *task_pool, const in
 
 
 /** Test */
-static void test(void) {
+static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 	Board board;
-	const Option option = {true, true};
+	const Option option = { .bulk = bulk, .do_quiet = true };
 	typedef struct TestBoard {
 		char *comments, *fen;
 		unsigned long long result;
@@ -1968,7 +1970,7 @@ static void test(void) {
 	for (TestBoard *t = tests; t->fen != NULL; ++t) {
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
 		board_set(&board, t->fen);
-		unsigned long long count = perft(&board, NULL, NULL, t->depth, &option);
+		unsigned long long count = perft(&board, hashtable, task_pool, t->depth, &option);
 		if (count == t->result) printf(" passed\n"); else printf(" FAILED ! %llu != %llu\n", count, t->result);
 	}
 }
@@ -1991,7 +1993,7 @@ int main(int argc, char **argv) {
 	char *fen = NULL;
 	int depth = 6, hash_size = 0, n_threads = 1, n_repetition = 1;
 	Move move;
-	bool div = false, loop = false, verbose = true;
+	bool div = false, loop = false, verbose = true, do_test = false;
 	Option option = {false, true};
 
 
@@ -2010,11 +2012,8 @@ int main(int argc, char **argv) {
 		else if (i < argc - 1 && (!strcmp(argv[i], "--repeat") || !strcmp(argv[i], "-r"))) n_repetition=atoi(argv[++i]);
 		else if (i < argc - 1 && (!strcmp(argv[i], "--seed") || !strcmp(argv[i], "-s"))) seed = atoi(argv[++i]);
 		else if (i < argc - 1 && (!strcmp(argv[i], "--threads") || !strcmp(argv[i], "-t"))) n_threads = atoi(argv[++i]);
-		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
-			init(seed);
-			test();
-			return 0;
-		} else {
+		else if (!strcmp(argv[i], "--test")) do_test = true;
+		else {
 			printf("%s <args> \n", argv[0]);
 			puts("Enumerate moves. The following options are available:");
 			puts("\t--bulk|-b               Do fast bulk counting at the last ply.");
@@ -2029,7 +2028,7 @@ int main(int argc, char **argv) {
 			puts("\t--quiet|-q              Disable verbose output.");
 			puts("\t--repeat|-r <n>         Repeat the test <n> time (default = 1).");
 			puts("\t--seed|-s <seed>        Change the seed of the pseudo move generator to <seed>.");
-			puts("\t--test|-t               Run an internal test to check the move generator.");
+			puts("\t--test                  Run an internal test to check the move generator.");
 			puts("\t--threads|-t <threads>  Use <threads> threads for parallel processing (default = 1).");
 			return 0;
 		}
@@ -2045,6 +2044,11 @@ int main(int argc, char **argv) {
 	if (n_threads < 1) n_threads = 1;
 	if (n_threads > 256) n_threads = 256;
 	taskpool_init(&task_pool, n_threads - 1, hashtable, &option);
+
+	if (do_test) {
+		test(hashtable, &task_pool, option.bulk);
+		return 0;
+	}
 
 	// board initialization
 	board_init(&board);
