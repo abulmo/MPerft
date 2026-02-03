@@ -24,7 +24,7 @@ endif
 
 #clang
 ifeq ($(CC),clang)
-	CFLAGS = -std=c23 -Wall -W -pedantic -D_GNU_SOURCE=1
+	CFLAGS = -std=c23 -Wall -W -pedantic -D_POSIX_C_SOURCE=199309L
 	ifeq ($(BUILD),fast)
 		CFLAGS += -O3 -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
@@ -42,7 +42,7 @@ endif
 
 #gcc
 ifeq ($(CC),gcc)
-	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D_GNU_SOURCE=1
+	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D_POSIX_SOURCE=199309L
 	ifeq ($(BUILD),fast)
 		CFLAGS += -Ofast -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
@@ -74,26 +74,29 @@ ifeq ($(CC),x86_64-w64-mingw32-gcc)
 endif
 
 #commands
-all :
-	$(CC) $(CFLAGS) -march=$(ARCH) mperft.c -o $(BIN)/$(EXE) $(LIBS)
-
 pgo :
 	$(MAKE) clean
 	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(BIN)/$(EXE) $(LIBS)
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b | grep perft;
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 8 -b -h 256 | grep perft;
+	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 6 -q;
+	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b -q;
+	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 8 -b -h 256 -q;
+	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b -t 4 -q;
 	$(PGO_MERGE)
 	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(BIN)/$(EXE) $(LIBS)
 
+no-pgo :
+	$(CC) $(CFLAGS) -march=$(ARCH) mperft.c -o $(BIN)/$(EXE) $(LIBS)
+
+
 prof:
-	$(MAKE) BUILD=profile
+	$(MAKE) no-pgo BUILD=profile
 
 
 debug :
-	$(MAKE) BUILD=debug
+	$(MAKE) no-pgo BUILD=debug
 
 cov :
-	$(MAKE) BUILD=cov
+	$(MAKE) no-pgo BUILD=cov
 
 clean:
 	$(RM) *.o *.dyn *.gcda *.gcno pgopti* *.prof*
