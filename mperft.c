@@ -5,7 +5,7 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 3.0
+ * @version 3.1
  */
 
 /* includes */
@@ -639,8 +639,9 @@ static inline char* move_to_string(const Move move, char *s) {
  * @param b Move
  * @return Comparison result
  */
-static int move_compare(const void *a, const void *b) {
-	return (*(Move*)a - *(Move*)b);
+int move_compare(const void *a, const void *b) {
+	char string_a[8], string_b[8];
+	return strcmp(move_to_string(*(Move*)a, string_a), move_to_string(*(Move*)b, string_b));
 }
 
 /**
@@ -2054,7 +2055,7 @@ int main(int argc, char **argv) {
 	if (n_repetition < 1) n_repetition = 1;
 
 	if (verbose) {
-		puts("Magic Perft (c) version 3.0 Richard Delorme - 2026");
+		puts("Magic Perft version 3.1 (c) Richard Delorme 2020 - 2026");
 		#if HAS_PEXT
 			puts("Bitboard move generation based on magic (pext) bitboards");
 		#else
