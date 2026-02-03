@@ -1,21 +1,23 @@
-/*
- * mperft.c
+/**
+ * @file mperft.c
  *
- * perft using magic bitboard & transposition table.
- * TODO: add multithreading
+ * @brief perft using magic bitboard, bulk counting, multithreading & transposition table.
  *
- * © 2020-2056 Richard Delorme
- * version 2.0
+ * @author Richard Delorme
+ * @copyright 2020-2026
+ * @version 3.0
  */
 
-/* Includes */
+/* includes */
 #include <ctype.h>
+#include <float.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
+#include <threads.h>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
@@ -28,45 +30,51 @@
 	#include <x86intrin.h>
 #endif
 
-/* As usual Microsoft does not follow standard :-( */
-#if defined(_MSC_VER)&& !defined(__POCC__)
-	static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) {
-		return __popcnt64(x);
-	}
-
-	static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) {
-		return _mm_tzcnt_64(x);
-	}
-
-	static inline bool stdc_has_single_bit_ull(const unsigned long long x) {
-		return x && !(x & (x - 1));
-	}
-
-	static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) {
-		return x ? 1ull << (63 - __lzcnt64(x)) : x;
-	}
-
-	static inline void* aligned_alloc(size_t alignment, size_t size) {
-		return _aligned_malloc(size, alignment);
-	}
-#else
+// include stdbit.h if available, otherwise partially implement it.
+#if __has_include(<stdbit.h>)
 	#include <stdbit.h>
+#else
+	static inline bool stdc_has_single_bit_ull(const unsigned long long x) { return x && !(x & (x - 1));}
+	#if defined(_MSC_VER)
+		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __popcnt64(x); }
+		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __popcnt64(~x); }
+		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return _tzcnt_u64(x); }
+		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __lzcnt64(x)) : x;}
+	#elif defined(_GNU_C)
+		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __builtin_popcountll(x); }
+		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __builtin_popcountll(~x); }
+		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return __builtin_tzcntll(x); }
+		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __builtin_lzcntll(x)) : x;}
+	#endif
 #endif
 
-/* fast PEXT availability */
+// aligned_alloc for windows
+#if defined(_MSC_VER)
+	static inline void* aligned_alloc(size_t alignment, size_t size) {	return _aligned_malloc(size, alignment); }
+#endif
+
+// fast PEXT availability
 #if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
 	#define HAS_PEXT 1
 #endif
 
-/* Types */
+/** Types */
+/** Limis: Game size & Move size */
 typedef enum {GAME_SIZE = 4096, MOVE_SIZE = 256} Limits;
 
+/** Bitboard: 64-bit unsigned integer representing a bitboard */
 typedef uint64_t Bitboard;
 
+/** Random: 64-bit unsigned integer representing a random number */
 typedef uint64_t Random;
 
+/** Color: Enum representing the color of a piece */
 typedef enum { WHITE, BLACK, COLOR_SIZE } Color;
 
+/** SplitLimits: Enum representing the limits for splitting the search */
+typedef enum { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 2 } SplitLimits;
+
+/** Square: Enum representing the squares on the board */
 typedef enum
 {
 	A1, B1, C1, D1, E1, F1, G1, H1,
@@ -80,91 +88,143 @@ typedef enum
 	BOARD_SIZE, ENPASSANT_NONE = BOARD_SIZE, BOARD_OUT = -1
 } Square;
 
+/** Piece: Enum representing the pieces on the board */
 typedef enum { PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PIECE_SIZE } Piece;
 
+/** CPiece: Enum representing the pieces on the board */
 typedef enum { EMPTY, WPAWN, BPAWN, WKNIGHT, BKNIGHT, WBISHOP, BBISHOP, WROOK, BROOK, WQUEEN, BQUEEN, WKING, BKING, CPIECE_SIZE } CPiece;
 
+/** Promotion: Enum representing the promotions */
 typedef enum { KNIGHT_PROMOTION = 0x1000, BISHOP_PROMOTION = 0x2000, ROOK_PROMOTION = 0x3000, QUEEN_PROMOTION = 0x4000 } Promotion;
 
+/** Move: Enum representing the moves on the board */
 typedef uint16_t Move;
 
-typedef struct Key {
-	uint64_t code;
-	uint32_t index;
+/** Key: Struct representing a key for a hash table */
+typedef struct {
+	uint64_t code; ///< Hash code for the key
+	uint32_t index; ///< Index for the key
 } Key;
 
-typedef struct Attack {
-	Bitboard mask;
-	Bitboard magic;
-	Bitboard shift;
-	Bitboard *attack;
+/** Attack: Struct to compute the target squares of a sliding piece on the board */
+typedef struct {
+	Bitboard mask; ///< Bitboard mask for the attack
+	Bitboard magic; ///< Bitboard magic for the attack
+	Bitboard shift; ///< Bitboard shift for the attack
+	Bitboard *attack; ///< Bitboard attacks for the attack
 } Attack;
 
-typedef struct Mask {
-	Bitboard between[BOARD_SIZE];
-	int direction[BOARD_SIZE];
-	Bitboard diagonal;
-	Bitboard antidiagonal;
-	Bitboard file;
-	Bitboard rank;
-	Bitboard pawn_attack[COLOR_SIZE];
-	Bitboard pawn_push[COLOR_SIZE];
-	Bitboard enpassant;
-	Bitboard knight;
-	Bitboard king;
-	Attack bishop;
-	Attack rook;
+/** Mask: Struct to compute various bitboard mask on the board */
+typedef struct {
+	Bitboard between[BOARD_SIZE]; ///< Bitboard mask for the squares between two squares
+	int direction[BOARD_SIZE]; ///< Bitboard direction
+	Bitboard diagonal; ///< Bitboard mask for the diagonal squares
+	Bitboard antidiagonal; ///< Bitboard mask for the antidiagonal squares
+	Bitboard file; ///< Bitboard mask for the file squares
+	Bitboard rank; ///< Bitboard mask for the rank squares
+	Bitboard pawn_attack[COLOR_SIZE]; ///< Bitboard mask for the pawn attack squares
+	Bitboard pawn_push[COLOR_SIZE]; ///< Bitboard mask for the pawn push squares
+	Bitboard enpassant; ///< Bitboard mask for the enpassant squares
+	Bitboard knight; ///< Bitboard mask for the knight squares
+	Bitboard king; ///< Bitboard mask for the king squares
+	Attack bishop; ///< Bitboard mask for the bishop squares
+	Attack rook; ///< Bitboard mask for the rook squares
 } Mask;
 
-typedef struct BoardStack {
-	Bitboard pinned;
-	Bitboard checkers;
-	Key key;
-	uint8_t castling;
-	uint8_t enpassant;
-	uint8_t victim;
-} BoardStack;
-
-typedef struct Board {
-	Bitboard piece[PIECE_SIZE];
-	Bitboard color[COLOR_SIZE];
-	Bitboard pinned;
-	Bitboard checkers;
-	uint8_t cpiece[BOARD_SIZE];
-	Square x_king[COLOR_SIZE];
-	Key key;
-	int ply;
-	Color player;
-	uint8_t castling;
-	uint8_t enpassant;
+/** Board: Struct to represent the chess board */
+typedef struct {
+	Bitboard piece[PIECE_SIZE]; ///< Bitboard mask for the pieces
+	Bitboard color[COLOR_SIZE]; ///< Bitboard mask for the pieces' colors
+	Bitboard pinned; ///< Bitboard mask for the pinned squares
+	Bitboard checkers; ///< Bitboard mask for the checkers squares
+	uint8_t cpiece[BOARD_SIZE]; ///< mailbox for the pieces
+	Square x_king[COLOR_SIZE]; ///< The king squares
+	Key key; ///< Zobrist key
+	int ply; ///< ply counter
+	Color player; ///< Current player color
+	uint8_t castling; ///< Bitboard mask for the castling squares
+	uint8_t enpassant; ///< The enpassant square
 } Board;
 
-typedef struct MoveArray {
-	Move move[MOVE_SIZE];
-	int n;
-	int i;
+/** MoveArray: Struct to represent an array of moves */
+typedef struct {
+	Move move[MOVE_SIZE]; ///< Array of moves
+	int n; ///< Number of moves in the array
+	int i; ///< Index of the current move
 } MoveArray;
 
+/** Hash: Struct to represent an entry in the transposition table */
 typedef struct {
-	uint64_t code;
-	uint64_t data;
+	uint64_t code; ///< Hash code
+	uint64_t data; ///< Hash data : count (58 bits) | depth (6 bits)
 } Hash;
 
+/** HashTable: Struct to represent a hash table */
 typedef struct {
-	Hash *hash;
-	uint64_t mask;
+	Hash *hash; ///< Array of hash entries
+	atomic_int *spin; ///< Array of spin locks
+	uint64_t mask; ///< Hash table mask
 } HashTable;
 
+
+/** Options: Struct to represent options to perform perft */
+typedef struct {
+	bool bulk; ///< Use bulking count (directly count the number of moves at the last ply without generating them)
+	bool do_quiet; ///< Also count the quiet moves (non capture & non promtion)
+} Option;
+
+/** Node: Struct to represent a node where the perft is splitted among several tasks in the search tree */
+typedef struct {
+	uint64_t count; ///< Count of moves at this node
+	atomic_int spin; ///< Spin lock for the node
+	int task_id[MAX_SPLIT]; ///< List of tasks used at this node
+	int n_split; ///< Number of tasks used at this node
+} Node;
+
+/** Task: Struct to represent a task in the search tree */
+typedef struct {
+	Board board; ///< Board state at this task
+	Node *node; ///< Pointer to the node associated with this task
+	HashTable *hash_table; ///< Pointer to the shared hash table
+	const Option *option; ///< Pointer to the perft options
+	struct TaskPool *task_pool; ///< Pointer to the task pool
+	int depth; ///< Perft depth
+	int id; ///< Task ID
+
+	thrd_t thread; ///< Thread ID
+	mtx_t mutex; ///< Mutex for the task
+	cnd_t condition; ///< Condition variable for the task
+	bool loop; ///< Loop flag for the task
+	bool run; ///< Run flag for the task
+} Task;
+
+/** TaskPool: Struct to represent a task pool, ie a set of tasks */
+typedef struct TaskPool {
+	Task *tasks; ///< Pointer to the tasks array
+	int n_tasks; ///< Number of tasks in the pool
+	Task **idle_tasks; ///< Pointer to the idle tasks array
+	int n_idle; ///< Number of idle tasks in the pool
+	atomic_int spin; ///< Spin lock for the task pool
+} TaskPool;
+
 /* Constants */
+
+/** RANK: Bitboard representing a rank mask */
 const Bitboard RANK[] =  {
 	0x00000000000000ffULL, 0x000000000000ff00ULL, 0x0000000000ff0000ULL, 0x00000000ff000000ULL,
 	0x000000ff00000000ULL, 0x0000ff0000000000ULL, 0x00ff000000000000ULL, 0xff00000000000000ULL,
 };
+
+/** COLUMN: Bitboard representing a column mask */
 const Bitboard COLUMN[] = {
 	0x0101010101010101ULL, 0x0202020202020202ULL, 0x0404040404040404ULL, 0x0808080808080808ULL,
 	0x1010101010101010ULL, 0x2020202020202020ULL, 0x4040404040404040ULL, 0x8080808080808080ULL,
 };
+
+/** PUSH: Array representing the push values for each pawn color */
 const int PUSH[] = {8, -8};
+
+/** MASK_CASTLING: Array representing the mask for castling */
 const uint8_t MASK_CASTLING[BOARD_SIZE] = {
 	13,15,15,15,12,15,15,14,
 	15,15,15,15,15,15,15,15,
@@ -175,38 +235,38 @@ const uint8_t MASK_CASTLING[BOARD_SIZE] = {
 	15,15,15,15,15,15,15,15,
 	 7,15,15,15, 3,15,15,11
 };
+
+/** CAN_CASTLE_KINGSIDE: Array representing the ability to castle kingside for each color */
 const int CAN_CASTLE_KINGSIDE[COLOR_SIZE] = {1, 4};
+
+/** CAN_CASTLE_QUEENSIDE: Array representing the ability to castle queenside for each color */
 const int CAN_CASTLE_QUEENSIDE[COLOR_SIZE] = {2, 8};
+
+/** PROMOTION_RANK: Array representing the promotion rank for each color */
 const Bitboard PROMOTION_RANK[] = {0xff00000000000000ULL, 0x00000000000000ffULL};
+
+/** MASK48: Mask for 48-bit random number generation */
 const Random MASK48 = 0xFFFFFFFFFFFFull;
+
+/** BUCKET_SIZE: Size of the bucket */
 const int BUCKET_SIZE = 4;
 
+/** SPINLOCK STATE Enum representing the state of a spin lock */
+enum {SL_FREE = 0, SL_BUSY = 1};
+
 /* Globals */
-Mask MASK[BOARD_SIZE];
-Key KEY_PLAYER[COLOR_SIZE];
-Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE];
-Key KEY_CASTLING[16];
-Key KEY_ENPASSANT[BOARD_SIZE + 1];
-Key KEY_PLAY;
+Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
+Key KEY_PLAYER[COLOR_SIZE]; ///< Key for each player
+Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE]; ///< Key for each square and piece
+Key KEY_CASTLING[16]; ///< Key for each castling state
+Key KEY_ENPASSANT[BOARD_SIZE + 1]; ///< Key for each en passant state
+Key KEY_PLAY; ///< Key to switch players
 
-/* Byte swap (= vertical mirror) */
-Bitboard bit_bswap(Bitboard b) {
-#if defined(_MSC_VER)
-	return _byteswap_uint64(b);
-#elif defined(__POCC__)
-	return _bswap64(b);
-#elif defined(__GNUC__)
-	return __builtin_bswap64(b);
-#else
-	b = ((b >>  8) & 0x00ff00ff00ff00ffull) | ((b <<  8) & 0xff00ff00ff00ff00ull);
-	b = ((b >> 16) & 0x0000ffff0000ffffull) | ((b << 16) & 0xffff0000ffff0000ull);
-	b = ((b >> 32) & 0x00000000ffffffffull) | ((b << 32) & 0xffffffff00000000ull);
-	return b;
-#endif
-}
-
-/* Time in seconds */
-double chrono(void) {
+/**
+ *  @brief Measure time in seconds as a double.
+ *  @return Elapsed Time in seconds
+ */
+static inline double chrono(void) {
 	#if defined(__unix__) || defined(__APPLE__)
 		#if _POSIX_TIMERS > 0
 			struct timespec t;
@@ -223,14 +283,22 @@ double chrono(void) {
 	#endif
 }
 
-/* Memory error */
-void memory_error(const char *function) {
+/**
+ *  @brief Memory error.
+ *  @param function Function name
+ */
+static void memory_error(const char *function) {
 	fprintf(stderr, "Fatal Error: memory allocation failure in %s\n", function);
 	exit(EXIT_FAILURE);
 }
 
-/* Parse error. */
-void parse_error(const char *string, const char *done, const char *msg) {
+/**
+ *  @brief Parse error.
+ *  @param string Input string
+ *  @param done   Done string
+ *  @param msg    Message string
+ */
+static void parse_error(const char *string, const char *done, const char *msg) {
 	size_t n;
 
 	fprintf(stderr, "\nError in %s '%s'\n", msg, string);
@@ -242,17 +310,25 @@ void parse_error(const char *string, const char *done, const char *msg) {
 	exit(EXIT_FAILURE);
 }
 
-/* Skip spaces */
-char *parse_next(const char *s) {
-	while (isspace((int)*s)) ++s;
-	return (char*) s;
+/**
+ *  @brief Skip spaces.
+ *  @param string String to skip spaces in
+ *  @return Pointer to first non-space character
+ */
+static char *parse_next(const char *string) {
+	while (isspace((int)*string)) ++string;
+	return (char*) string;
 }
 
-/* Get a random number */
-uint64_t random_get(Random *random) {
+/**
+ * @brief Get a random number
+ * @param random Random number generator
+ * @return Random number
+ */
+static uint64_t random_get(Random *random) {
 	const uint64_t A = 0x5deece66dull;
 	const uint64_t B = 0xbull;
-	register uint64_t r;
+	uint64_t r;
 
 	*random = ((A * *random + B) & MASK48);
 	r = *random >> 16;
@@ -260,17 +336,56 @@ uint64_t random_get(Random *random) {
 	return (r << 32) | (*random >> 16);
 }
 
-/* Init the random generator */
-void random_seed(Random *random, const uint64_t seed) {
+/**
+ * @brief Init the random generator
+ * @param random Random number generator
+ * @param seed Seed for random number generator
+ */
+static inline void random_seed(Random *random, const uint64_t seed) {
 	*random = (seed & MASK48);
 }
 
-/* Opponent color */
-static inline Color opponent(const Color c) {
-	return !c;
+/**
+ * @brief Initialize a spinlock
+ * @param spin spinlock to initialize
+ */
+static inline void spin_init(atomic_int *spin) {
+	atomic_init(spin, SL_FREE);
 }
 
-/* Convert a char to a Color */
+/**
+ * @brief Lock a spinlock
+ * @param spin spinlock to lock
+ */
+static inline void spin_lock(atomic_int *spin) {
+	for(;;) {
+		if (atomic_exchange_explicit(spin, SL_BUSY, memory_order_acquire) == SL_FREE) return;
+		while (atomic_load_explicit(spin, memory_order_relaxed)) thrd_yield();
+	}
+}
+
+/**
+ * @brief Unlock a spinlock
+ * @param spin spinlock to unlock
+ */
+static inline void spin_unlock(atomic_int *spin) {
+	atomic_store_explicit(spin, SL_FREE, memory_order_release);
+}
+
+/**
+ * @brief Get opponent color
+ * @param color Color to get opponent of
+ * @return Opponent color
+ */
+static inline Color opponent(const Color color) {
+	return !color;
+}
+
+/**
+ * @brief Convert a char to a Color
+ * @param c Char to convert to Color
+ * @return Color corresponding to char
+ */
 static inline Color color_from_char(const char c) {
 	switch (tolower(c)) {
 		case 'b': return BLACK;
@@ -279,42 +394,77 @@ static inline Color color_from_char(const char c) {
 	}
 }
 
-/* Loop over each color */
+/**
+ * @brief Loop over each color
+ * @param c Color variable to iterate over
+ */
 #define foreach_color(c) for ((c) = WHITE; (c) < COLOR_SIZE; ++(c))
 
-/* Make a square from file & rank */
+/**
+ * @brief Make a square from file & rank
+ * @param f File of square
+ * @param r Rank of square
+ * @return Square corresponding to file & rank
+ */
 static inline Square square(const int f, const int r) {
 	return (r << 3) + f;
 }
 
-/* Make a square from file & rank if inside the board */
+/**
+ * @brief Make a square from file & rank if inside the board
+ * @param f File of square
+ * @param r Rank of square
+ * @return Square corresponding to file & rank if inside the board, BOARD_OUT otherwise
+ */
 static inline Square square_safe(const int f, const int r) {
 	if (0 <= f && f < 8 && 0 <= r && r < 8) return square(f, r);
 	else return BOARD_OUT;
 }
 
-/* Get square rank */
+/**
+ * @brief Get square rank
+ * @param x Square to get rank from
+ * @return Rank of square
+ */
 static inline Square rank(const Square x) {
 	return x >> 3;
 }
 
-/* Get square file */
+/**
+ * @brief Get square file
+ * @param x Square to get file from
+ * @return File of square
+ */
 static inline Square file(const Square x) {
 	return x & 7;
 }
 
-/* Create a bitboard with one bit (square) set */
+/**
+ * @brief Create a bitboard with one bit (square) set
+ * @param x Square to set bit for
+ * @return Bitboard with one bit set
+ */
 static inline Bitboard square_to_bit(const int x) {
 	return 1ULL << x;
 }
 
-/* Create a bitboard with one bit set from file/rank if inside the board */
+/**
+ * @brief Create a bitboard with one bit set from file/rank if inside the board
+ * @param f File to set bit for
+ * @param r Rank to set bit for
+ * @return Bitboard with one bit set
+ */
 static inline Bitboard file_rank_to_bit(const int f, const int r) {
 	if (0 <= f && f < 8 && 0 <= r && r < 8) return square_to_bit(square(f, r));
 	else return 0;
 }
 
-/* Parse a square from a string. */
+/**
+ * @brief Parse a square from a string.
+ * @param string String to parse
+ * @param x Square to set bit for
+ * @return True if successful, false otherwise
+ */
 static inline bool square_parse(char **string, Square *x) {
 	const char *s = *string;
 	if ('a' <= s[0] && s[0] <= 'h' && '1' <= s[1] && s[1] <= '8') {
@@ -324,50 +474,91 @@ static inline bool square_parse(char **string, Square *x) {
 	} else return false;
 }
 
-/* Get the first occupied square from a bitboard */
+/**
+ * @brief Get the first occupied square from a bitboard.
+ * @param b Bitboard to get first occupied square from
+ * @return Square of the first occupied square, or BOARD_SIZE if none
+ */
 static inline Square square_first(Bitboard b) {
 	return stdc_trailing_zeros_ull(b);
 }
 
-/* Get the next occupied square from a bitboard */
+/**
+ * @brief Get the next occupied square from a bitboard.
+ * @param b Bitboard to get next occupied square from
+ * @return Square of the next occupied square, or BOARD_SIZE if none
+ */
 static inline Square square_next(Bitboard *b) {
 	int i = square_first(*b);
 	*b &= *b - 1;
 	return i;
 }
 
-/* Loop over each square */
+/**
+ * @brief Macro to loop over each square
+ * @param x Square to iterate over
+ */
 #define foreach_square(x) for ((x) = A1; (x) < BOARD_SIZE; ++(x))
 
-/* Check if square 'x' is on 7th rank */
+/**
+ * @brief Check if square 'x' is on 7th rank
+ * @param x Square to check
+ * @param c Color of the square
+ * @return True if square is on 7th rank, false otherwise
+ */
 static inline bool is_on_seventh_rank(const Square x, const Color c) {
 	return c ? rank(x) == 1 : rank(x) == 6;
 }
 
-/* Check if square 'x' is on 2nd rank */
+/**
+ * @brief Check if square 'x' is on 2nd rank
+ * @param x Square to check
+ * @param c Color of the square
+ * @return True if square is on 2nd rank, false otherwise
+ */
 static inline bool is_on_second_rank(const Square x, const Color c) {
 	return c ? rank(x) == 6 : rank(x) == 1;
 }
 
-/* Loop over each cpiece */
+/**
+ * @brief Macro to loop over each colored piece.
+ * @param cp Colored piece to iterate over
+ */
 #define foreach_cpiece(cp) for ((cp) = WPAWN; (cp) < CPIECE_SIZE; ++(cp))
 
-/* make a colored piece */
+/**
+ * @brief make a colored piece from a piece & a color
+ * @param p Piece
+ * @param c Color of the piece
+ * @return Colored piece
+ */
 static inline CPiece cpiece_make(Piece p, const Color c) {
 	return (p << 1) + c + 1;
 }
 
-/* Get the Piece of a CPiece*/
+/**
+ * @brief Get the Piece part of a CPiece
+ * @param p Colored piece
+ * @return Piece
+ */
 static inline Piece cpiece_piece(CPiece p) {
 	return (p - 1) >> 1;
 }
 
-/* Get the color of a CPiece */
+/**
+ * @brief Get the color of a CPiece
+ * @param p Colored piece
+ * @return Color
+ */
 static inline Color cpiece_color(CPiece p) {
 	return (p - 1) & 1;
 }
 
-/* Convert a char to a colored piece */
+/**
+ * @brief Convert a char to a colored piece
+ * @param c Char to convert
+ * @return Colored piece
+ */
 static inline CPiece cpiece_from_char(const char c) {
 	CPiece p;
 
@@ -375,7 +566,11 @@ static inline CPiece cpiece_from_char(const char c) {
 	return p;
 }
 
-/* Convert a char to a castling flag */
+/**
+ * Convert a char to a castling flag
+ * @param c Char to convert
+ * @return Castling flag
+ */
 static inline int castling_from_char(const char c) {
 	switch (c) {
 		case 'K': return 1;
@@ -386,22 +581,39 @@ static inline int castling_from_char(const char c) {
 	}
 }
 
-/* Get the origin square of a move */
+/**
+ * @brief Get the source square of a move
+ * @param move Move
+ * @return Source square
+ */
 static inline Square move_from(const Move move) {
 	return move & 63;
 }
 
-/* Get the destination square of a move */
+/**
+ * @brief Get the destination square of a move
+ * @param move Move
+ * @return Destination square
+ */
 static inline Square move_to(const Move move) {
 	return (move >> 6) & 63;
 }
 
-/* Get the promoted piece of a move */
+/**
+ * @brief Get the promoted piece of a move
+ * @param move Move
+ * @return Promoted piece
+ */
 static inline Piece move_promotion(const Move move) {
 	return move >> 12;
 }
 
-/* Convert a move to a string */
+/**
+ * @brief Convert a move to a string
+ * @param move Move
+ * @param s String buffer
+ * @return String buffer
+ */
 static inline char* move_to_string(const Move move, char *s) {
 	static char string[8];
 
@@ -420,7 +632,23 @@ static inline char* move_to_string(const Move move, char *s) {
 	return s;
 }
 
-/* Generate attack index using the magic bitboard or pext approach */
+
+/**
+ * @brief Compare two moves
+ * @param a Move
+ * @param b Move
+ * @return Comparison result
+ */
+static int move_compare(const void *a, const void *b) {
+	return (*(Move*)a - *(Move*)b);
+}
+
+/**
+ * @brief Generate attack index using the magic bitboard or pext approach
+ * @param pieces Bitboard of pieces
+ * @param attack Attack structure
+ * @return Attack index
+ */
 static inline Bitboard magic_index(const Bitboard pieces, const Attack *attack) {
 #ifdef HAS_PEXT
 	return _pext_u64(pieces, attack->mask);
@@ -429,45 +657,85 @@ static inline Bitboard magic_index(const Bitboard pieces, const Attack *attack) 
 #endif
 }
 
-/* Generate pawn attack (capture) */
+/**
+ * @brief Generate pawn attack (capture)
+ * @param x Pawn's quare
+ * @param c Pawn's color
+ * @param target Bitboard of target squares
+ * @return Bitboard of pawn attack (capture)
+ */
 static inline Bitboard pawn_attack(const Square x, const Color c, const Bitboard target) {
 	return MASK[x].pawn_attack[c] & target;
 }
 
-/* Generate knight attack */
+/**
+ * @brief Generate knight attack
+ * @param x Knight's square
+ * @param target Bitboard of target squares
+ * @return Bitboard of knight attack
+ */
 static inline Bitboard knight_attack(const Square x, const Bitboard target) {
 	return MASK[x].knight & target;
 }
 
-/* Generate bishop attack */
+/**
+ * @brief Generate bishop attack
+ * @param pieces Bitboard of pieces
+ * @param x Bishop's square
+ * @param target Bitboard of target squares
+ * @return Bitboard of bishop attack
+ */
 static inline Bitboard bishop_attack(const Bitboard pieces, const Square x, const Bitboard target) {
 	return MASK[x].bishop.attack[magic_index(pieces, &MASK[x].bishop)] & target;
 }
 
-/* Generate rook attack */
+/**
+ * @brief Generate rook attack
+ * @param pieces Bitboard of pieces
+ * @param x Rook's square
+ * @param target Bitboard of target squares
+ * @return Bitboard of rook attack
+ */
 static inline Bitboard rook_attack(const Bitboard pieces, const Square x, const Bitboard target) {
 	return MASK[x].rook.attack[magic_index(pieces, &MASK[x].rook)] & target;
 }
 
-/* Generate king attack */
+/**
+ * @brief Generate king attack
+ * @param x King's square
+ * @param target Bitboard of target squares
+ * @return Bitboard of king attack
+ */
 static inline Bitboard king_attack(const Square x, const Bitboard target) {
 	return MASK[x].king & target;
 }
 
-/* Init key to a random value */
+/**
+ * @brief Initialize key to a random value
+ * @param key Key to initialize
+ * @param r Random number generator
+ */
 static inline void key_init(Key *key, Random *r) {
 	key->code = random_get(r);
 	key->index = (uint32_t) random_get(r);
 }
 
-/* Xor a key with another one */
+/**
+ * @brief Xor a key with another one
+ * @param key Key to xor
+ * @param k Key to xor with
+ */
 static inline void key_xor(Key *key, const Key *k) {
 	key->code ^= k->code;
 	key->index ^= k->index;
 }
 
-/* Set a key from a board */
-void key_set(Key *key, const Board *board) {
+/**
+ * @brief Set a key from a board
+ * @param key Key to set
+ * @param board Board to set key from
+ */
+static void key_set(Key *key, const Board *board) {
 	int x;
 
 	*key = KEY_PLAYER[board->player];
@@ -478,8 +746,13 @@ void key_set(Key *key, const Board *board) {
 	key_xor(key, &KEY_ENPASSANT[board->enpassant]);
 }
 
-/* Update the key after a move is made */
-void key_update(Key *key, const Board *board, const Move move) {
+/**
+ * @brief Update the key after a move is made
+ * @param key Key to update
+ * @param board Board to update key from
+ * @param move Move to update key with
+ */
+static void key_update(Key *key, const Board *board, const Move move) {
 	const Square from = move_from(move);
 	const Square to = move_to(move);
 	CPiece cp = board->cpiece[from];
@@ -525,8 +798,14 @@ void key_update(Key *key, const Board *board, const Move move) {
 }
 
 
-/* compute slider attack to feed array accessed by magic index */
-Bitboard compute_slider_attack(const int x, const Bitboard pieces, const int d[4][2]) {
+/**
+ * @brief Compute slider attack to feed array accessed by magic index
+ * @param x Square to compute attack for
+ * @param pieces Bitboard of pieces
+ * @param d Direction array
+ * @return Bitboard of attacks
+ */
+static Bitboard compute_slider_attack(const int x, const Bitboard pieces, const int d[4][2]) {
 	Bitboard a = 0, b;
 	int i, r, f;
 
@@ -541,8 +820,11 @@ Bitboard compute_slider_attack(const int x, const Bitboard pieces, const int d[4
 	return a;
 }
 
-/* Initialize some global constants */
-void init(const uint64_t seed) {
+/**
+ * @brief Initialize some global constants
+ * @param seed Seed for random number generator
+ */
+static void init(const uint64_t seed) {
 	Bitboard o, inside;
 	int r, f, i, j, c;
 	int x, y, z;
@@ -631,9 +913,9 @@ void init(const uint64_t seed) {
 
 		//magic bishop
 		mask->bishop.mask = (mask->diagonal | mask->antidiagonal) & inside;
-		mask->bishop.shift = 64 - stdc_count_ones_ull(mask->bishop.mask);
+		mask->bishop.shift = stdc_count_zeros_ull(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
-		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1u << stdc_count_ones_ull(mask[-1].bishop.mask));
+		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1ull << stdc_count_ones_ull(mask[-1].bishop.mask));
 		o = 0; do {
 			mask->bishop.attack[magic_index(o, &mask->bishop)] = compute_slider_attack(x, o, bishop_dir);
 			o = (o - mask->bishop.mask) & mask->bishop.mask;
@@ -641,9 +923,9 @@ void init(const uint64_t seed) {
 
 		// magic rook
 		mask->rook.mask = (mask->rank | mask->file) & inside;
-		mask->rook.shift = 64 - stdc_count_ones_ull(mask->rook.mask);
+		mask->rook.shift = stdc_count_zeros_ull(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
-		if (x) mask->rook.attack = mask[-1].rook.attack + (1u << stdc_count_ones_ull(mask[-1].rook.mask));
+		if (x) mask->rook.attack = mask[-1].rook.attack + (1ull << stdc_count_ones_ull(mask[-1].rook.mask));
 		o = 0; do {
 			mask->rook.attack[magic_index(o, &mask->rook)] = compute_slider_attack(x, o, rook_dir);
 			o = (o - mask->rook.mask) & mask->rook.mask;
@@ -668,12 +950,21 @@ void init(const uint64_t seed) {
 	key_init(KEY_ENPASSANT + BOARD_SIZE, random);
 }
 
-/* check if an enpassant move is possible */
+/**
+ * @brief Check if an enpassant move is possible
+ * @param board Board to check
+ * @return True if enpassant is possible, false otherwise
+ */
 static inline bool board_enpassant(const Board *board) {
 	return board->enpassant != ENPASSANT_NONE;
 }
 
-/* deplace a piece on the board */
+/**
+ * @brief Deplace a piece on the board.
+ * @param board Board to modify
+ * @param from Square to move from
+ * @param to Square to move to
+ */
 static inline void board_deplace_piece(Board *board, const Square from, const Square to) {
 	const Bitboard b = square_to_bit(from) ^ square_to_bit(to);
 	const CPiece cp = board->cpiece[from];
@@ -686,8 +977,11 @@ static inline void board_deplace_piece(Board *board, const Square from, const Sq
 	board->cpiece[from] = EMPTY;
 }
 
-/* generate checker & pinned pieces */
-void generate_checkers(Board *board) {
+/**
+ * @brief Generate checker & pinned pieces.
+ * @param board Board to generate checkers and pinned pieces for
+ */
+static void generate_checkers(Board *board) {
 	const Color c = board->player;
 	const Color o = opponent(c);
 	const Square k = board->x_king[c];
@@ -742,13 +1036,19 @@ void generate_checkers(Board *board) {
 	return;
 }
 
-/* Clear the board. Set all of its content to zeroes. */
+/**
+ * @brief Clear the board. Set all of its content to zeroes.
+ * @param board Board to clear
+ */
 static inline void board_clear(Board *board) {
 	memset(board, 0, sizeof (Board));
 }
 
-/* Initialize the board to the starting position. */
-void board_init(Board *board) {
+/**
+ * @brief Initialize the board to the starting position.
+ * @param board Board to initialize
+ */
+static void board_init(Board *board) {
 	static const uint8_t cpiece[BOARD_SIZE] = {
 		WROOK, WKNIGHT, WBISHOP, WQUEEN, WKING, WBISHOP, WKNIGHT, WROOK,
 		WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,
@@ -781,8 +1081,12 @@ void board_init(Board *board) {
 	key_set(&board->key, board);
 }
 
-/* parse a FEN board description */
-void board_set(Board *board, char *string) {
+/**
+ * @brief parse a FEN board description
+ * @param board Board to parse FEN string into
+ * @param string FEN string to parse
+ */
+static void board_set(Board *board, char *string) {
 	char *s = string;
 	Square x;
 	int r, f;
@@ -847,8 +1151,14 @@ void board_set(Board *board, char *string) {
 	generate_checkers(board);
 }
 
-/* Play a move on the board. */
-void board_copymake(const Board *board, const Move move, const Key *key, Board *next) {
+/**
+ * @brief Play a move on the board.
+ * @param board Board to play move on
+ * @param move Move to play
+ * @param key Key to use for hashing
+ * @param next Board to store result in
+ */
+static void board_copymake(const Board *board, const Move move, const Key *key, Board *next) {
 	const Square from = move_from(move);
 	const Square to = move_to(move);
 	const Square enpassant = board->enpassant;
@@ -906,8 +1216,12 @@ void board_copymake(const Board *board, const Move move, const Key *key, Board *
 	generate_checkers(next);
 }
 
-/* Print the board. */
-void board_print(const Board *board, FILE *output) {
+/**
+ * Print the board.
+ * @param board Board to print
+ * @param output File to print board to
+ */
+static void board_print(const Board *board, FILE *output) {
 	Square x;
 	int f, r;
 	const char p[] = ".PpNnBbRrQqKk#";
@@ -934,8 +1248,14 @@ void board_print(const Board *board, FILE *output) {
 }
 
 
-/* Check if a square is attacked.*/
-bool board_is_square_attacked(const Board *board, const Square x, const Color c) {
+/**
+ * @brief Check if a square is attacked.
+ * @param board Board to check
+ * @param x Square to check
+ * @param c Color to check
+ * @return True if square is attacked, false otherwise
+ */
+static bool board_is_square_attacked(const Board *board, const Square x, const Color c) {
 	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
 	const Bitboard C = board->color[c];
 
@@ -946,13 +1266,25 @@ bool board_is_square_attacked(const Board *board, const Square x, const Color c)
 	    || king_attack(x, C & board->piece[KING]);
 }
 
-/* Append a move to an array of moves */
+/**
+ * Append a move to an array of moves
+ * @param move Array of moves
+ * @param from From square
+ * @param to To square
+ * @return Pointer to next move
+ */
 static inline Move* push_move(Move *move, const Square from, const Square to) {
 	*move++ = from | (to << 6);
 	return move;
 }
 
-/* Append promotions from the same move */
+/**
+ * @brief Append promotions from the same move
+ * @param move Array of moves
+ * @param from From square
+ * @param to To square
+ * @return Pointer to next move
+ */
 static inline Move* push_promotion(Move *move, const Square from, const Square to) {
 	const Move m = from | (to << 6);
 
@@ -963,8 +1295,14 @@ static inline Move* push_promotion(Move *move, const Square from, const Square t
 	return move;
 }
 
-/* Append all moves from a square */
-Move* push_moves(Move *move, Bitboard attack, const Square from) {
+/**
+ * @brief Append all moves from a square
+ * @param move Array of moves
+ * @param attack Bitboard of attacked squares
+ * @param from From square
+ * @return Pointer to next move
+ */
+static inline Move* push_moves(Move *move, Bitboard attack, const Square from) {
 	Square to;
 
 	while (attack) {
@@ -974,8 +1312,14 @@ Move* push_moves(Move *move, Bitboard attack, const Square from) {
 	return move;
 }
 
-/* Append all pawn moves from a direction */
-Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) {
+/**
+ * @brief Append all pawn moves from a direction
+ * @param move Array of moves
+ * @param attack Bitboard of attacked squares
+ * @param dir Direction
+ * @return Pointer to next move
+ */
+static inline Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) {
 	Square to;
 
 	while (attack) {
@@ -985,8 +1329,14 @@ Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) {
 	return move;
 }
 
-/* Append all promotions from a direction */
-Move *push_promotions(Move *move, Bitboard attack, const int dir) {
+/**
+ * @brief Append all promotions from a direction
+ * @param move Array of moves
+ * @param attack Bitboard of attacked squares
+ * @param dir Direction
+ * @return Pointer to next move
+ */
+static inline Move *push_promotions(Move *move, Bitboard attack, const int dir) {
 	Square to;
 
 	while (attack) {
@@ -996,8 +1346,15 @@ Move *push_promotions(Move *move, Bitboard attack, const int dir) {
 	return move;
 }
 
-/* Generate all legal moves */
-int generate_moves(Board *board, Move *move, const bool generate, const bool do_quiet) {
+/**
+ * @brief Generate all legal moves
+ * @param board Board state
+ * @param move Array of moves
+ * @param generate Whether to generate moves
+ * @param do_quiet Whether to generate quiet moves
+ * @return Number of moves generated
+ */
+static int generate_moves(Board *board, Move *move, const bool generate, const bool do_quiet) {
 	const Color c = board->player;
 	const Color o = opponent(c);
 	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
@@ -1178,82 +1535,372 @@ int generate_moves(Board *board, Move *move, const bool generate, const bool do_
 	return count;
 }
 
-/* Generate all legal moves or captures */
+/**
+ * @brief Generate all legal moves or captures
+ * @param ma Move array
+ * @param board Board state
+ * @param do_quiet Do quiet moves also
+ */
 static inline void movearray_generate(MoveArray *ma, Board *board,  const bool do_quiet) {
 	ma->i = 0;
 	ma->n = generate_moves(board, ma->move, true, do_quiet);
 	ma->move[ma->n] = 0;
 }
 
-/* Get next move */
+/**
+ * @brief Get next move
+ * @param ma Move array
+ * @return Next move
+ */
 static inline Move movearray_next(MoveArray *ma) {
 	return ma->move[ma->i++];
 }
 
-/* Hash creation */
-HashTable* hash_create(const size_t size) {
+/**
+ * @brief Get number of moves left
+ * @param ma Move array
+ * @return Number of moves left
+ */
+static inline int movearray_todo(MoveArray *ma) {
+	return ma->n - ma->i;
+}
+
+/**
+ * @brief Sort moves in the array
+ * @param ma Move array
+ */
+static inline void movearray_sort(MoveArray *ma) {
+	qsort(ma->move, ma->n, sizeof(Move), move_compare);
+}
+
+/**
+ * @brief Hash creation
+ * @param size Hash table size
+ * @return Hash table
+ */
+static HashTable* hash_create(const size_t size) {
 	const size_t n = stdc_bit_floor_ull(size << 20) / sizeof(Hash);
 
-	HashTable *hashtable = malloc(sizeof (HashTable));
-	if (hashtable == NULL) memory_error(__func__);
-	hashtable->hash = aligned_alloc(32, (n + BUCKET_SIZE) * sizeof (Hash));
-	if (hashtable->hash == NULL) memory_error(__func__);
-	hashtable->mask = n - 1;
+	HashTable *hash_table = malloc(sizeof (HashTable));
+	if (hash_table == NULL) memory_error(__func__);
+	hash_table->hash = aligned_alloc(32, (n + BUCKET_SIZE) * sizeof (Hash));
+	if (hash_table->hash == NULL) memory_error(__func__);
+	hash_table->spin = aligned_alloc(sizeof(atomic_int), (n + BUCKET_SIZE) * sizeof (atomic_int));
+	if (hash_table->spin == NULL) memory_error(__func__);
+	hash_table->mask = n - 1;
 
-	return hashtable;
+	return hash_table;
 }
 
-/* Hash free resources */
-void hash_destroy(HashTable *hashtable) {
-	if (hashtable) free(hashtable->hash);
-	free(hashtable);
+/**
+ * @brief Hash free resources
+ * @param hash_table Hash table
+ */
+static void hash_destroy(HashTable *hash_table) {
+	if (hash_table) {
+		free(hash_table->hash);
+		free(hash_table->spin);
+		free(hash_table);
+		hash_table = NULL;
+	}
 }
 
-/* Hash clear */
-static inline void hash_clear(HashTable *hashtable) {
-	memset(hashtable->hash, 0, (hashtable->mask + BUCKET_SIZE + 1) * sizeof(Hash));
+/**
+ * @brief Clear the Hash table.
+ * @param hash_table Hash table
+ */
+static inline void hash_clear(HashTable *hash_table) {
+	memset(hash_table->hash, 0, (hash_table->mask + BUCKET_SIZE + 1) * sizeof(Hash));
+	memset(hash_table->spin, 0, (hash_table->mask + BUCKET_SIZE + 1) * sizeof(atomic_int));
 }
 
-/* Hash probe */
-uint64_t hash_probe(const HashTable *hashtable, const Key *key, const int depth) {
-	Hash *hash = hashtable->hash + (key->index & hashtable->mask);
+/**
+ * @brief Hash probe
+ * @param hash_table Hash table
+ * @param key Key
+ * @param depth Depth
+ * @return Count
+ */
+static uint64_t hash_probe(const HashTable *hash_table, const Key *key, const int depth) {
+	Hash *hash = hash_table->hash + (key->index & hash_table->mask);
+	atomic_int *spin = hash_table->spin + (key->index & hash_table->mask);
 
 	for (int i = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) return hash[i].data >> 6;
+		spin_lock(spin + i);
+		if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) {
+			uint64_t count = hash[i].data >> 6;
+			spin_unlock(spin + i);
+			return count;
+		}
+		spin_unlock(spin + i);
 	}
 	return 0;
 }
 
-/* Hash store */
-void hash_store(const HashTable *hashtable, const Key *key, const int depth, const uint64_t count) {
-	Hash *hash = (hashtable->hash + (key->index & hashtable->mask));
+/**
+ * @brief Store a count result into the hash table.
+ * @param hash_table Hash table
+ * @param key Key
+ * @param depth Depth
+ * @param count Count
+ */
+static void hash_store(const HashTable *hash_table, const Key *key, const int depth, const uint64_t count) {
+	Hash *hash = (hash_table->hash + (key->index & hash_table->mask));
+	atomic_int *spin = hash_table->spin + (key->index & hash_table->mask);
 	const uint64_t data = count << 6 | depth;
 	int i, j;
 
 	for (i = j = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && hash[i].data == data) return;
-		if (hash[i].data < hash[j].data) j = i;
+		spin_lock(spin + i);
+		if (hash[i].code == key->code && hash[i].data == data) {
+			spin_unlock(spin + i);
+			return;
+		};
+		spin_unlock(spin + i);
+		if (hash[i].data < hash[j].data) j = i; // here we don't care of the lock
 	}
 
-	hash[j].code = key->code;
-	hash[j].data = data;
+	spin_lock(spin + j);
+		hash[j].code = key->code;
+		hash[j].data = data;
+	spin_unlock(spin + j);
 }
 
-/* Prefetch */
+/**
+ * @brief Prefetch a hash table entry (for faster access).
+ * @param hashtable Hash table
+ * @param key Key
+ */
 static inline void hash_prefetch(HashTable *hashtable, const Key *key) {
 	_mm_prefetch((const char*) (hashtable->hash + (key->index & hashtable->mask)), _MM_HINT_T2);
+	_mm_prefetch((const char*) (hashtable->spin + (key->index & hashtable->mask)), _MM_HINT_T2);
 }
 
-/* Recursive Perft with optional hashtable, bulk counting & capture only generation */
-uint64_t perft(Board *board, HashTable *hashtable, const int depth, const bool bulk, const bool do_quiet) {
+/**
+ * @brief Put an idle task into the task pool.
+ * @param task_pool Task pool
+ * @param task Task
+ */
+static void taskpool_put_idle_task(TaskPool *task_pool, Task *task) {
+	spin_lock(&task_pool->spin);
+
+		task_pool->idle_tasks[task_pool->n_idle++] = task;
+
+	spin_unlock(&task_pool->spin);
+}
+
+/**
+ * @brief Run a perft search in parallel.
+ * @param task Task
+ */
+static void task_run(Task *task) {
+	uint64_t perft(Board *, HashTable*, TaskPool *, const int, const Option*);
+	uint64_t count;
+	Node *node = task->node;
+	Board *board = &task->board;
+	HashTable *hash_table = task->hash_table;
+	TaskPool *task_pool = task->task_pool;
+	const Key *key = &board->key;
+	const int depth  = task->depth;
+	const Option *option = task->option;
+
+	// do perft
+	if (hash_table) {
+		count = hash_probe(hash_table, key, depth);
+		if (count == 0) {
+			count = perft(board, hash_table, task_pool, depth, option);
+			hash_store(hash_table, key, depth, count);
+		}
+	} else count = perft(board, hash_table, task_pool, depth, option);
+
+	// store the result & release the thread
+	spin_lock(&node->spin);
+		node->count += count;
+		for (int i = 0; i < node->n_split; i++) {
+			if (node->task_id[i] == task->id) {
+				node->task_id[i] = node->task_id[--node->n_split];
+				break;
+			}
+		}
+		// if (task->depth > 6) printf("task %d at depth %d finalized\n", task->id, task->depth);
+
+	spin_unlock(&node->spin);
+
+	task->run = false;
+	taskpool_put_idle_task(task->task_pool, task);
+
+}
+
+/**
+ * Free resources used by a task.
+ * @param task Task
+ */
+static void task_free(Task *task) {
+	task->loop = false;
+	cnd_signal(&task->condition);
+	thrd_join(task->thread, NULL);
+	mtx_destroy(&task->mutex);
+	cnd_destroy(&task->condition);
+}
+
+/**
+ * Task loop.
+ * @param param Task
+ */
+static int task_loop(void *param)
+{
+	Task *task = (Task*) param;
+
+	mtx_lock(&task->mutex);
+	task->loop = true;
+	task->run = false;
+
+	while (task->loop) {
+		if (!task->run) cnd_wait(&task->condition, &task->mutex);
+		if (task->run) task_run(task);
+	}
+
+	mtx_unlock(&task->mutex);
+
+	return thrd_success;
+}
+
+/**
+ * Initialize a task.
+ * @param task Task
+ * @param hash_table Hash table
+ * @param task_pool Task pool
+ * @param id Task ID
+ * @param option Option
+ */
+static void task_init(Task *task, HashTable *hash_table, TaskPool *task_pool, const int id, const Option *option) {
+	task->run = false;
+	task->loop = false;
+	task->id = id;
+	task->depth = 0;
+	task->hash_table = hash_table;
+	task->task_pool = task_pool;
+	task->option = option;
+	mtx_init(&task->mutex, mtx_plain);
+	cnd_init(&task->condition);
+	thrd_create(&task->thread, task_loop, task);
+}
+
+/**
+ * Initialize a pool of tasks
+ * @param task_pool Task pool
+ * @param n_threads Number of threads
+ * @param hash_table Hash table
+ * @param option Option
+ */
+static void taskpool_init(TaskPool *task_pool, const int n_threads, HashTable *hash_table, const Option *option) {
+	task_pool->n_tasks = task_pool->n_idle = n_threads;
+	task_pool->tasks = malloc(n_threads * sizeof (Task));
+	task_pool->idle_tasks = malloc(n_threads * sizeof (Task*));
+	spin_init(&task_pool->spin);
+	for (int i = 0 ; i < n_threads; ++i) {
+		task_init(task_pool->tasks + i, hash_table, task_pool, i, option);
+		task_pool->idle_tasks[i] = task_pool->tasks + i;
+	}
+	// wait for all tasks to be initialized...
+	thrd_sleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 10000}, NULL);
+}
+
+/**
+ * @breif Free ressources of a pool of tasks
+ * @param task_pool Task pool
+ */
+static void taskpool_free(TaskPool *task_pool) {
+	for (int i = 0 ; i < task_pool->n_tasks; ++i) {
+		task_free(task_pool->tasks + i);
+	}
+	free(task_pool->tasks);
+	free(task_pool->idle_tasks);
+}
+
+/**
+ * @brief Initialize a node
+ * @param node Node to initialize
+ */
+static inline void node_init(Node *node) {
+	spin_init(&node->spin);
+	node->n_split = 0;
+	node->count = 0;
+}
+
+/**
+ * @brief Split the search
+ * @param node Node to split
+ * @param board Board to split
+ * @param task_pool Task pool
+ * @param depth Depth of the search
+ * @param moves_todo Number of moves remaining
+ * @return True if the search was split, false otherwise
+ */
+static bool node_split(Node *node, const Board *board, TaskPool *task_pool, const int depth, const int moves_todo) {
+	if (depth < MIN_SPLIT_DEPTH || moves_todo < MIN_SPLIT_REMAINING_MOVES) return false;
+
+	spin_lock(&task_pool->spin);
+		if (task_pool->n_idle == 0) {
+			spin_unlock(&task_pool->spin);
+			return false;
+		}
+
+		spin_lock(&node->spin);
+			if (node->n_split >= MAX_SPLIT) {
+				spin_unlock(&node->spin);
+				spin_unlock(&task_pool->spin);
+				return false;
+			}
+			Task *task = task_pool->idle_tasks[--task_pool->n_idle];
+			node->task_id[node->n_split++] = task->id;
+		spin_unlock(&node->spin);
+	spin_unlock(&task_pool->spin);
+
+	mtx_lock(&task->mutex);
+		task->run = true;
+		task->board = *board;
+		task->node = node;
+		task->depth = depth;
+		// if (depth > 6) printf("Splitting node using task %d at depth %d\n", task->id, depth);
+		cnd_signal(&task->condition);
+	mtx_unlock(&task->mutex);
+
+	return true;
+}
+
+/**
+ * @brief Wait for all tasks to terminate
+ * @param node Node to wait for
+ * @return Total count of nodes
+ */
+static inline uint64_t node_wait(Node *node) {
+	while (node->n_split > 0) {
+		thrd_yield();
+	}
+	return node->count;
+}
+
+/**
+ * @brief Recursive Perft with optional hashtable, pool of tasks, bulk counting & capture only generation.
+ * @param board Board to analyze
+ * @param hashtable Hash table to use
+ * @param task_pool Task pool to use
+ * @param depth Depth to analyze
+ * @param option Options to use
+ * @return Total count of nodes
+ */
+uint64_t perft(Board *board, HashTable *hashtable, TaskPool *task_pool, const int depth, const Option *option) {
 	Board next;
 	uint64_t count = 0, hash_count;
 	Move move;
 	MoveArray ma;
 	const bool use_hash = (hashtable && depth > 2);
+	Node node;
 	Key key;
 
-	movearray_generate(&ma, board, do_quiet || board->checkers);
+	movearray_generate(&ma, board, option->do_quiet || board->checkers);
+	node_init(&node);
 
 	while ((move = movearray_next(&ma)) != 0) {
 		if (use_hash) {
@@ -1262,25 +1909,32 @@ uint64_t perft(Board *board, HashTable *hashtable, const int depth, const bool b
 		}
 		board_copymake(board, move, &key, &next);
 		if (depth == 1) ++count;
-		else if (bulk && depth == 2) count += generate_moves(&next, NULL, false, do_quiet || next.checkers);
+		else if (option->bulk && depth == 2) count += generate_moves(&next, NULL, false, option->do_quiet || next.checkers);
 		else {
 			if (use_hash) {
 				hash_count = hash_probe(hashtable, &key, depth - 1);
 				if (hash_count == 0) {
-					hash_count = perft(&next, hashtable, depth - 1, bulk, do_quiet);
-					hash_store(hashtable, &key, depth - 1, hash_count);
+					if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
+						hash_count += perft(&next, hashtable, task_pool, depth - 1, option);
+						hash_store(hashtable, &key, depth - 1, hash_count);
+					};
 				}
 				count += hash_count;
-			} else count += perft(&next, hashtable, depth - 1, bulk, do_quiet);
+			} else if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
+				count += perft(&next, hashtable, task_pool, depth - 1, option);
+			}
 		}
 	}
+	count += node_wait(&node);
 
 	return count;
 }
 
-/* test */
-void test(void) {
+
+/** Test */
+static void test(void) {
 	Board board;
+	const Option option = {true, true};
 	typedef struct TestBoard {
 		char *comments, *fen;
 		unsigned long long result;
@@ -1313,46 +1967,48 @@ void test(void) {
 	for (TestBoard *t = tests; t->fen != NULL; ++t) {
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
 		board_set(&board, t->fen);
-		unsigned long long count = perft(&board, NULL, t->depth, true, true);
+		unsigned long long count = perft(&board, NULL, NULL, t->depth, &option);
 		if (count == t->result) printf(" passed\n"); else printf(" FAILED ! %llu != %llu\n", count, t->result);
 	}
 }
 
-/* main */
+/**
+ * @brief main
+ * @param argc Number of arguments
+ * @param argv Arguments
+ * @return Exit code
+ */
 int main(int argc, char **argv) {
 	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
-	alignas(64) Board board, next;
+	Board board, next;
 	HashTable *hashtable = NULL;
+	TaskPool task_pool = {.n_tasks = 0, .n_idle = 0};
 	Key key;
 	MoveArray ma;
 	unsigned long long count, total = 0;
 	uint64_t seed = 0xA170EBA;
 	char *fen = NULL;
-	int depth = 6, hash_size = 0, n_repetition = 1;
+	int depth = 6, hash_size = 0, n_threads = 1, n_repetition = 1;
 	Move move;
-	bool div = false, capture = false, bulk = false, loop = false;
-
-	puts("Magic Perft (c) version 2.0 Richard Delorme - 2026");
-#if HAS_PEXT
-	puts("Bitboard move generation based on magic (pext) bitboards");
-#else
-	puts("Bitboard move generation based on magic bitboards");
-#endif
+	bool div = false, loop = false, verbose = true;
+	Option option = {false, true};
 
 
 	// argument
 	for (int i = 1; i < argc; ++i) {
-		if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
-		else if (!strcmp(argv[i], "--kiwipete") || !strcmp(argv[i], "-k")) fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+		if (!strcmp(argv[i], "--bulk") || !strcmp(argv[i], "-b")) option.bulk = true;
+		else if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "-c")) option.do_quiet = false;
 		else if (!strcmp(argv[i], "--depth") || !strcmp(argv[i], "-d")) depth = atoi(argv[++i]);
-		else if (!strcmp(argv[i], "--bulk") || !strcmp(argv[i], "-b")) bulk = true;
-		else if (!strcmp(argv[i], "--div")) div = true;
-		else if (!strcmp(argv[i], "--capture") || !strcmp(argv[i], "-c")) capture = true;
-		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
 		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
-		else if (i < argc - 1 && (!strcmp(argv[i], "--repeat") || !strcmp(argv[i], "-r"))) n_repetition=atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--div")) div = true;
+		else if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
 		else if (i < argc - 1 && (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-h"))) hash_size = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--kiwipete") || !strcmp(argv[i], "-k")) fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
+		else if (!strcmp(argv[i], "--quiet") || !strcmp(argv[i], "-q")) verbose = false;
+		else if (i < argc - 1 && (!strcmp(argv[i], "--repeat") || !strcmp(argv[i], "-r"))) n_repetition=atoi(argv[++i]);
 		else if (i < argc - 1 && (!strcmp(argv[i], "--seed") || !strcmp(argv[i], "-s"))) seed = atoi(argv[++i]);
+		else if (i < argc - 1 && (!strcmp(argv[i], "--threads") || !strcmp(argv[i], "-t"))) n_threads = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--test") || !strcmp(argv[i], "-t")) {
 			init(seed);
 			test();
@@ -1360,49 +2016,70 @@ int main(int argc, char **argv) {
 		} else {
 			printf("%s <args> \n", argv[0]);
 			puts("Enumerate moves. The following options are available:");
-			puts("\t--help|-?            Print this message.");
-			puts("\t--fen|-f <fen>       Use the position indicated in FEN format (default=starting position).");
-			puts("\t--kiwipete|-k        Use the kiwipete position.");
-			puts("\t--depth|-d <depth>   Test up to this depth (default=6).");
-			puts("\t--bulk|-b            Do fast bulk counting at the last ply.");
-			puts("\t--hash|-h <size>     Use a hashtable with <size> Megabytes (default 0, no hashtable).");
-			puts("\t--capture|-c         Generate only captures, promotions & check evasions.");
-			puts("\t--div                Print a node count for each move.");
-			puts("\t--seed|-s <seed>     Change the seed of the pseudo move generator to <seed>.");
-			puts("\t--loop|-l            Loop from depth 1 to <depth>.");
-			puts("\t--repeat|-r <n>      Repeat the test <n> time (default = 1).");
-			puts("\t--test|-t            Run an internal test to check the move generator.");
+			puts("\t--bulk|-b               Do fast bulk counting at the last ply.");
+			puts("\t--capture|-c            Generate only captures, promotions & check evasions.");
+			puts("\t[--depth|-d] <depth>    Test up to this depth (default = 6).");
+			puts("\t--div                   Print a node count for each move.");
+			puts("\t--fen|-f <fen>          Use the position indicated in FEN format (default=starting position).");
+			puts("\t--hash|-h <size>        Use a hashtable with <size> Megabytes (default = 0, no hashtable).");
+			puts("\t--help|-?               Print this message.");
+			puts("\t--kiwipete|-k           Use the kiwipete position.");
+			puts("\t--loop|-l               Loop from depth 1 to <depth>.");
+			puts("\t--quiet|-q              Disable verbose output.");
+			puts("\t--repeat|-r <n>         Repeat the test <n> time (default = 1).");
+			puts("\t--seed|-s <seed>        Change the seed of the pseudo move generator to <seed>.");
+			puts("\t--test|-t               Run an internal test to check the move generator.");
+			puts("\t--threads|-t <threads>  Use <threads> threads for parallel processing (default = 1).");
 			return 0;
 		}
 	}
 
-	// post-initialisation
+	// hash table initialization
 	init(seed);
-	board_init(&board);
+	if (hash_size < 0) hash_size = 0;
+	if (hash_size > 65536) hash_size = 65536; // max size of 64G for a 32 bit index
 	if (hash_size > 0) hashtable = hash_create(hash_size);
+
+	// thread initialization
+	if (n_threads < 1) n_threads = 1;
+	if (n_threads > 256) n_threads = 256;
+	taskpool_init(&task_pool, n_threads - 1, hashtable, &option);
+
+	// board initialization
+	board_init(&board);
 	if (fen) board_set(&board, fen);
+
 	if (depth < 1) depth = 1;
-	if (depth > 64) depth = 64;
+	if (depth > 63) depth = 63;
 	if (n_repetition < 1) n_repetition = 1;
 
-	printf("Perft setting: ");
-	if (hash_size == 0) printf("no hashing; ");
-	else printf("hashtable size: %u Mbytes (%llu entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), (unsigned long long) (hashtable->mask + BUCKET_SIZE + 1));
-	if (bulk) printf("with"); else printf("no"); printf(" bulk counting;");
-	if (capture) printf(" capture only;");
-	puts("");
-	board_print(&board, stdout);
-
+	if (verbose) {
+		puts("Magic Perft (c) version 3.0 Richard Delorme - 2026");
+		#if HAS_PEXT
+			puts("Bitboard move generation based on magic (pext) bitboards");
+		#else
+			puts("Bitboard move generation based on magic bitboards");
+		#endif
+		printf("Perft setting: ");
+		if (hash_size == 0) printf("no hashing; ");
+		else printf("hashtable size: %u Mbytes (%llu entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), (unsigned long long) (hashtable->mask + BUCKET_SIZE + 1));
+		if (n_threads > 1) printf("with %d threads; ", n_threads); else printf("no multithreading; ");
+		if (option.bulk) printf("with"); else printf("no"); printf(" bulk counting;");
+		if (!option.do_quiet) printf(" capture only;");
+		puts("");
+		board_print(&board, stdout);
+	}
 	// root search
 	if (div) {
-		movearray_generate(&ma, &board, !capture || board.checkers);
+		movearray_generate(&ma, &board, option.do_quiet || board.checkers);
+		movearray_sort(&ma);
 		while ((move = movearray_next(&ma)) != 0) {
 			partial_time = -chrono();
 			key_update(&key, &board, move);
 			board_copymake(&board, move, &key, &next);
 			if (depth == 1) count = 1;
-			else if (bulk && depth == 2) count = generate_moves(&next, NULL, false, !capture || next.checkers);
-			else count = perft(&next, hashtable, depth - 1, bulk, !capture);
+			else if (option.bulk && depth == 2) count = generate_moves(&next, NULL, false, option.do_quiet || next.checkers);
+			else count = perft(&next, hashtable, &task_pool, depth - 1, &option);
 			total += count;
 			partial_time += chrono();
 			total_time += partial_time;
@@ -1413,7 +2090,7 @@ int main(int argc, char **argv) {
 			for (int d = (loop ? 1 : depth); d <= depth; ++d) {
 				if (hashtable) hash_clear(hashtable);
 				partial_time = -chrono();
-				count = perft(&board, hashtable, d, bulk, !capture);
+				count = perft(&board, hashtable, &task_pool, d, &option);
 				total += count;
 				partial_time += chrono();
 				total_time += partial_time;
@@ -1423,12 +2100,14 @@ int main(int argc, char **argv) {
 	}
 	if (div || loop || n_repetition > 1) printf("total    : %15llu leaves in %10.3f s %12.0f leaves/s\n", total, total_time, total / total_time);
 
+
 	hash_destroy(hashtable);
+	taskpool_free(&task_pool);
 	free(MASK->bishop.attack);
 	free(MASK->rook.attack);
 
 	full_time += chrono();
-	printf("full time: %10.3f s\n", full_time);
+	if (verbose) printf("full time: %10.3f s\n", full_time);
 
 	return 0;
 }
