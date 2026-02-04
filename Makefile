@@ -24,7 +24,7 @@ endif
 
 #clang
 ifeq ($(CC),clang)
-	CFLAGS = -std=c23 -Wall -W -pedantic -D_POSIX_C_SOURCE=199309L
+	CFLAGS = -std=c23 -Wall -W -pedantic
 	ifeq ($(BUILD),fast)
 		CFLAGS += -O3 -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
@@ -42,7 +42,7 @@ endif
 
 #gcc
 ifeq ($(CC),gcc)
-	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D_POSIX_SOURCE=199309L
+	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23
 	ifeq ($(BUILD),fast)
 		CFLAGS += -Ofast -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
@@ -60,7 +60,7 @@ endif
 
 #mingw 64 bits
 ifeq ($(CC),x86_64-w64-mingw32-gcc)
-	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D__USE_MINGW_ANSI_STDIO -DWINVER=0x501 -D_GNU_SOURCE=1
+	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D__USE_MINGW_ANSI_STDIO
 	EXE = mperft.exe
 	ifeq ($(BUILD),fast)
 		CFLAGS += -O3 -flto -fwhole-program -DNDEBUG
