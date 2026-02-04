@@ -20,11 +20,6 @@
 #include <string.h>
 #include <threads.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>
-#include <sys/time.h>
-#endif
-
 #if defined(_WIN32)
 	#include <intrin.h>
 #elif defined(__x86_64__)
@@ -268,20 +263,9 @@ Key KEY_PLAY; ///< Key to switch players
  *  @return Elapsed Time in seconds
  */
 static inline double chrono(void) {
-	#if defined(__unix__) || defined(__APPLE__)
-		#if _POSIX_TIMERS > 0
-			struct timespec t;
-			clock_gettime(CLOCK_MONOTONIC, &t);
-			return 0.000000001 * t.tv_nsec + t.tv_sec;
-		#else
-			struct timeval t;
-			gettimeofday(&t, NULL);
-			return 0.000001 * t.tv_usec + t.tv_sec;
-		#endif
-	#elif defined(_WIN32)
-		int GetTickCount(void);
-		return 0.001 * GetTickCount();
-	#endif
+	struct timespec t;
+	timespec_get(&t, TIME_UTC);
+	return 0.000000001 * t.tv_nsec + t.tv_sec;
 }
 
 /**
