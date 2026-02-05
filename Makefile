@@ -40,6 +40,24 @@ ifeq ($(CC),clang)
 
 endif
 
+#icx (intel compiler)
+ifeq ($(CC),icx)
+	CFLAGS = -std=c23 -Wall -W -pedantic
+	ifeq ($(BUILD),fast)
+		CFLAGS += -O3 -flto -DNDEBUG
+	else ifeq ($(BUILD),profile)
+		CFLAGS += -O3 -fno-inline -DNDEBUG
+		LIBS += -lprofiler
+	else
+		CFLAGS += -O0 -g -fno-inline -ftrapv
+	endif
+
+	PGO_GEN = -fprofile-instr-generate
+	PGO_USE = -fprofile-instr-use=mperft.profdata
+	PGO_MERGE = llvm-profdata merge -output=mperft.profdata mperft-*.profraw
+
+endif
+
 #gcc
 ifeq ($(CC),gcc)
 	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23
