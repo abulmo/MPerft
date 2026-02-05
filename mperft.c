@@ -5,7 +5,7 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 3.1
+ * @version 3.2
  */
 
 /* includes */
@@ -34,19 +34,14 @@
 	#if defined(_MSC_VER)
 		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __popcnt64(x); }
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __popcnt64(~x); }
-		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return _tzcnt_u64(x); }
+		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? _tzcnt_u64(x) : 64; }
 		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __lzcnt64(x)) : x;}
 	#elif defined(_GNU_C)
 		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __builtin_popcountll(x); }
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __builtin_popcountll(~x); }
-		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return __builtin_tzcntll(x); }
-		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __builtin_lzcntll(x)) : x;}
+		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? __builtin_ctzll(x) : 64; }
+		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __builtin_clzll(x)) : x;}
 	#endif
-#endif
-
-// aligned_alloc for windows
-#if defined(_MSC_VER)
-	static inline void* aligned_alloc(size_t alignment, size_t size) {	return _aligned_malloc(size, alignment); }
 #endif
 
 // fast PEXT availability
@@ -847,9 +842,9 @@ static void init(const uint64_t seed) {
     static const int king_dir[8][2] = {{-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
 
 	// MASK initialisations
-	MASK->bishop.attack = aligned_alloc(64, sizeof (Bitboard) * 0x1480);
+	MASK->bishop.attack = malloc(sizeof (Bitboard) * 0x1480);
 	if (MASK->bishop.attack == NULL) memory_error(__func__);
-	MASK->rook.attack = aligned_alloc(64, sizeof (Bitboard) * 0x19000);
+	MASK->rook.attack = malloc(sizeof (Bitboard) * 0x19000);
 	if (MASK->rook.attack == NULL) memory_error(__func__);
 	for (x = 0; x < 64; ++x) {
 		f = file(x);
@@ -1566,13 +1561,15 @@ static inline void movearray_sort(MoveArray *ma) {
  * @return Hash table
  */
 static HashTable* hash_create(const size_t size) {
+	if (size == 0) return NULL;
+
 	const size_t n = stdc_bit_floor_ull(size << 20) / sizeof(Hash);
 
 	HashTable *hash_table = malloc(sizeof (HashTable));
 	if (hash_table == NULL) memory_error(__func__);
-	hash_table->hash = aligned_alloc(32, (n + BUCKET_SIZE) * sizeof (Hash));
+	hash_table->hash = malloc((n + BUCKET_SIZE) * sizeof (Hash));
 	if (hash_table->hash == NULL) memory_error(__func__);
-	hash_table->spin = aligned_alloc(sizeof(atomic_int), (n + BUCKET_SIZE) * sizeof (atomic_int));
+	hash_table->spin = malloc((n + BUCKET_SIZE) * sizeof (atomic_int));
 	if (hash_table->spin == NULL) memory_error(__func__);
 	hash_table->mask = n - 1;
 
@@ -1644,7 +1641,7 @@ static void hash_store(const HashTable *hash_table, const Key *key, const int de
 			return;
 		};
 		spin_unlock(spin + i);
-		if (hash[i].data < hash[j].data) j = i; // here we don't care of the lock
+		if (hash[i].data < hash[j].data) j = i; // here we don't care of the lock, a few bad chosen storage place is fine.
 	}
 
 	spin_lock(spin + j);
@@ -1776,16 +1773,16 @@ static void task_init(Task *task, HashTable *hash_table, TaskPool *task_pool, co
 /**
  * Initialize a pool of tasks
  * @param task_pool Task pool
- * @param n_threads Number of threads
+ * @param n_workers Number of parallel threads (total threads - 1)
  * @param hash_table Hash table
  * @param option Option
  */
-static void taskpool_init(TaskPool *task_pool, const int n_threads, HashTable *hash_table, const Option *option) {
-	task_pool->n_tasks = task_pool->n_idle = n_threads;
-	task_pool->tasks = malloc(n_threads * sizeof (Task));
-	task_pool->idle_tasks = malloc(n_threads * sizeof (Task*));
+static void taskpool_init(TaskPool *task_pool, const int n_workers, HashTable *hash_table, const Option *option) {
+	task_pool->n_tasks = task_pool->n_idle = n_workers;
+	task_pool->tasks = n_workers ? malloc(n_workers * sizeof (Task)) : NULL;
+	task_pool->idle_tasks = n_workers ? malloc(n_workers * sizeof (Task*)) : NULL;
 	spin_init(&task_pool->spin);
-	for (int i = 0 ; i < n_threads; ++i) {
+	for (int i = 0 ; i < n_workers; ++i) {
 		task_init(task_pool->tasks + i, hash_table, task_pool, i, option);
 		task_pool->idle_tasks[i] = task_pool->tasks + i;
 	}
@@ -1960,10 +1957,13 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 }
 
 /**
- * @brief main
+ * @brief main function: programme entry
+ *
+ * Read the command line & execute what it is asked for.
+ *
  * @param argc Number of arguments
  * @param argv Arguments
- * @return Exit code
+ * @return 0
  */
 int main(int argc, char **argv) {
 	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
@@ -1979,7 +1979,6 @@ int main(int argc, char **argv) {
 	Move move;
 	bool div = false, loop = false, verbose = true, do_test = false;
 	Option option = {false, true};
-
 
 	// argument
 	for (int i = 1; i < argc; ++i) {
@@ -2022,7 +2021,7 @@ int main(int argc, char **argv) {
 	init(seed);
 	if (hash_size < 0) hash_size = 0;
 	if (hash_size > 65536) hash_size = 65536; // max size of 64G for a 32 bit index
-	if (hash_size > 0) hashtable = hash_create(hash_size);
+	hashtable = hash_create(hash_size);
 
 	// thread initialization
 	if (n_threads < 1) n_threads = 1;
@@ -2043,7 +2042,7 @@ int main(int argc, char **argv) {
 	if (n_repetition < 1) n_repetition = 1;
 
 	if (verbose) {
-		puts("Magic Perft version 3.1 (c) Richard Delorme 2020 - 2026");
+		puts("Magic Perft version 3.2 (c) Richard Delorme 2020 - 2026");
 		#if HAS_PEXT
 			puts("Bitboard move generation based on magic (pext) bitboards");
 		#else
