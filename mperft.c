@@ -1,4 +1,4 @@
-7/**
+/**
  * @file mperft.c
  *
  * @brief perft using magic bitboard, bulk counting, multithreading & transposition table.
