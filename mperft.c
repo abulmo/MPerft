@@ -1,4 +1,4 @@
-/**
+7/**
  * @file mperft.c
  *
  * @brief perft using magic bitboard, bulk counting, multithreading & transposition table.
@@ -36,7 +36,7 @@
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __popcnt64(~x); }
 		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? _tzcnt_u64(x) : 64; }
 		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __lzcnt64(x)) : x;}
-	#elif defined(_GNU_C)
+	#elif defined(__GNUC__)
 		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __builtin_popcountll(x); }
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __builtin_popcountll(~x); }
 		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? __builtin_ctzll(x) : 64; }
