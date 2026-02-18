@@ -1,5 +1,9 @@
 # MPerft
+<<<<<<< HEAD
+Fast bitboard chess move generation based on magic bitboards, optional bulking count, transposition table & multithreading
+=======
 Fast bitboard chess move generation based on magic bitboards, optional bulking count, transposition table & multithreading.
+>>>>>>> a9c06c1c9d6e63eeb6e11d669d097e147dc5ee57
 
 ## Usage:
 ```
@@ -23,8 +27,13 @@ Enumerate moves. The following options are available:
 
 ## Limitation:
 mperft is limited to a maximum depth of 64 plies.
+<<<<<<< HEAD
+The hash table is limited to 64 GB.
+The leaf counter is limited to 2^58 = 288230376151711744 leaves.
+=======
 The hash table is limited to 64 GB (65536 MB).
 The leaf counter is limited to 2^58 = 288,230,376,151,711,744 leaves.
+>>>>>>> a9c06c1c9d6e63eeb6e11d669d097e147dc5ee57
 
 ## Binary Release
 
@@ -33,6 +42,10 @@ Executable are given for Linux & Windows for intel64/amd64 cpu in 3 flavours:
  - x86-64 
  - x86-64-v2 support AVX extension, including the popcount instruction.
  - x86-64-v3 support AVX2 extension, including the PEX instruction.
+<<<<<<< HEAD
+ - x86-64-v4 support AVX512 extension.
+=======
+>>>>>>> a9c06c1c9d6e63eeb6e11d669d097e147dc5ee57
 
 ## Compilation
 You can compile mperft for your own CPU using the makefile or the .bat file provided for clang & icx (intel C compiler). For example under Linux, using the intel C compiler:
@@ -74,3 +87,8 @@ full time:      8.629 s
 - Version 3.0 Add support for multithreading.
 - Version 3.1 Remove some OS/platform dependencies. Alphabetically sort the move with the --div command.
 - Version 3.2 Remove more OS/platform dependencies. Fix a bug (free() incompatibility with _aligned_malloc()). Faster executable for Windows.
+<<<<<<< HEAD
+- Version 4.0 Code fix & optimisation
+
+=======
+>>>>>>> a9c06c1c9d6e63eeb6e11d669d097e147dc5ee57
