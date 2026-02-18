@@ -36,7 +36,7 @@ ifeq ($(CC),clang)
 
 	PGO_GEN = -fprofile-instr-generate
 	PGO_USE = -fprofile-instr-use=mperft.profdata
-	PGO_MERGE = llvm-profdata merge -output=mperft.profdata mperft-*.profraw
+	PGO_MERGE = llvm-profdata merge -output=mperft.profdata *.profraw
 
 endif
 
@@ -54,7 +54,7 @@ ifeq ($(CC),icx)
 
 	PGO_GEN = -fprofile-instr-generate
 	PGO_USE = -fprofile-instr-use=mperft.profdata
-	PGO_MERGE = llvm-profdata merge -output=mperft.profdata mperft-*.profraw
+	PGO_MERGE = llvm-profdata merge -output=mperft.profdata *.profraw
 
 endif
 
@@ -62,7 +62,7 @@ endif
 ifeq ($(CC),gcc)
 	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23
 	ifeq ($(BUILD),fast)
-		CFLAGS += -Ofast -flto -DNDEBUG
+		CFLAGS += -Ofast -flto -fwhole-program -DNDEBUG
 	else ifeq ($(BUILD),profile)
 		CFLAGS += -O3 -pg -DNDEBUG
 	else ifeq ($(BUILD),cov)
@@ -72,7 +72,7 @@ ifeq ($(CC),gcc)
 	endif
 
 	PGO_GEN = -fprofile-generate -lgcov
-	PGO_USE = -fprofile-use
+	PGO_USE = -fprofile-use -fprofile-correction
 	PGO_MERGE =
 endif
 
@@ -87,7 +87,7 @@ ifeq ($(CC),x86_64-w64-mingw32-gcc)
 	endif
 
 	PGO_GEN = -fprofile-generate -lgcov
-	PGO_USE = -fprofile-use
+	PGO_USE = -fprofile-use -fprofile-correction
 	PGO_MERGE =
 endif
 
@@ -95,10 +95,7 @@ endif
 pgo :
 	$(MAKE) clean
 	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(BIN)/$(EXE) $(LIBS)
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 6 -q;
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 7 -b -q;
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 8 -b -h 256 -q;
-	cd $(BIN); LLVM_PROFILE_FILE=mperft-%p.profraw ./$(EXE) -d 6 -b -t 4 -q;
+	cd $(BIN); ./$(EXE) -d 7 -b -t 4 -h 256 -q;
 	$(PGO_MERGE)
 	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(BIN)/$(EXE) $(LIBS)
 
