@@ -12,6 +12,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <inttypes.h>
+#include <stdalign.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -24,8 +25,6 @@
 	#include <intrin.h>
 #elif defined(__x86_64__)
 	#include <x86intrin.h>
-#elif defined(__ARM_ACLE)
-	#include <arm_acle.h>
 #endif
 
 // include stdbit.h if available, otherwise partially implement it.
@@ -64,8 +63,8 @@ typedef uint64_t Random;
 /** Color: Enum representing the color of a piece */
 typedef enum { WHITE, BLACK, COLOR_SIZE } Color;
 
-/** SplitLimits: Enum representing the limits for splitting the search */
-typedef enum { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3 } SplitLimits;
+/** PerftLimits: Enum representing the limits to split the search or to probe the hash */
+typedef enum { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3, MIN_HASH_DEPTH = 3 } PerftLimits;
 
 /** Square: Enum representing the squares on the board */
 typedef enum
@@ -2021,11 +2020,12 @@ static inline uint64_t node_wait(const Node *node) {
  * @return Total count of nodes
  */
 static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_pool, const uint32_t depth, const Option *option) {
+	const bool use_hash = (hashtable && depth >= MIN_HASH_DEPTH);
+	const bool use_bulk_counting = (option->bulk && depth == 2);
 	Board next;
 	uint64_t count = 0, hash_count;
 	Move move;
 	MoveArray ma;
-	const bool use_hash = (hashtable && depth > 2);
 	Node node;
 	Key key;
 
@@ -2039,7 +2039,7 @@ static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_p
 		}
 		board_copymake(board, move, &key, &next);
 		if (depth == 1) ++count;
-		else if (option->bulk && depth == 2) count += count_moves(&next, option->do_quiet || next.checkers);
+		else if (use_bulk_counting) count += count_moves(&next, option->do_quiet || next.checkers);
 		else {
 			if (use_hash) {
 				hash_count = hash_probe(hashtable, &key, depth - 1);
