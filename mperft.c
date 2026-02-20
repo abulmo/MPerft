@@ -27,6 +27,11 @@
 	#include <x86intrin.h>
 #endif
 
+#if defined(__linux__)
+	#include <unistd.h>
+	#include <sys/sysinfo.h>
+#endif
+
 // include stdbit.h if available, otherwise partially implement it.
 #if __has_include(<stdbit.h>)
 	#include <stdbit.h>
@@ -87,10 +92,10 @@ typedef enum { PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PIECE_SIZE } Piece;
 typedef enum { EMPTY, WPAWN, BPAWN, WKNIGHT, BKNIGHT, WBISHOP, BBISHOP, WROOK, BROOK, WQUEEN, BQUEEN, WKING, BKING, CPIECE_SIZE } CPiece;
 
 /** Promotion: Enum representing the promotions */
-typedef enum { KNIGHT_PROMOTION = 0x1000, BISHOP_PROMOTION = 0x2000, ROOK_PROMOTION = 0x3000, QUEEN_PROMOTION = 0x4000 } Promotion;
+typedef enum { KNIGHT_PROMOTION = KNIGHT << 15, BISHOP_PROMOTION = BISHOP << 15, ROOK_PROMOTION = ROOK << 15, QUEEN_PROMOTION = QUEEN << 15 } Promotion;
 
 /** Move: Enum representing the moves on the board */
-typedef uint16_t Move;
+typedef uint32_t Move;
 
 /** Key: Struct representing a key for a hash table */
 typedef struct {
@@ -129,10 +134,9 @@ typedef struct {
 	Bitboard color[COLOR_SIZE]; ///< Bitboard mask for the pieces' colors
 	Bitboard pinned; ///< Bitboard mask for the pinned squares
 	Bitboard checkers; ///< Bitboard mask for the checkers squares
-	uint8_t cpiece[BOARD_SIZE]; ///< mailbox for the pieces
-	Square x_king[COLOR_SIZE]; ///< The king squares
 	Key key; ///< Zobrist key
 	int ply; ///< ply counter
+	Square x_king[COLOR_SIZE]; ///< The king squares
 	Color player; ///< Current player color
 	uint8_t castling; ///< Bitboard mask for the castling squares
 	uint8_t enpassant; ///< The enpassant square
@@ -168,8 +172,8 @@ typedef struct {
 /** Node: Struct to represent a node where the perft is splitted among several tasks in the search tree */
 typedef struct {
 	uint64_t count; ///< Count of moves at this node
-	atomic_int spin; ///< Spin lock for the node
 	int task_id[MAX_SPLIT]; ///< List of tasks used at this node
+	atomic_int spin; ///< Spin lock for the node
 	int n_split; ///< Number of tasks used at this node
 } Node;
 
@@ -255,53 +259,6 @@ Key KEY_ENPASSANT[BOARD_SIZE + 1]; ///< Key for each en passant state
 Key KEY_PLAY; ///< Key to switch players
 
 /**
- *  @brief Measure time in seconds as a double.
- *  @return Elapsed Time in seconds
- */
-static inline double chrono(void) {
-	struct timespec t;
-	timespec_get(&t, TIME_UTC);
-	return 0.000000001 * t.tv_nsec + t.tv_sec;
-}
-
-/**
- *  @brief Memory error.
- *  @param function Function name
- */
-static void memory_error(const char *function) {
-	fprintf(stderr, "Fatal Error: memory allocation failure in %s\n", function);
-	exit(EXIT_FAILURE);
-}
-
-/**
- *  @brief Parse error.
- *  @param string Input string
- *  @param done   Done string
- *  @param msg    Message string
- */
-static void parse_error(const char *string, const char *done, const char *msg) {
-	size_t n;
-
-	fprintf(stderr, "\nError in %s '%s'\n", msg, string);
-	n = 11 + strlen(msg) + done - string;
-	if (n > 0 && n < 256) {
-		while (n--) putc('-', stderr);
-		putc('^', stderr); putc('\n', stderr); putc('\n', stderr);
-	}
-	exit(EXIT_FAILURE);
-}
-
-/**
- *  @brief Skip spaces.
- *  @param string String to skip spaces in
- *  @return Pointer to first non-space character
- */
-static char *parse_next(const char *string) {
-	while (isspace((int)*string)) ++string;
-	return (char*) string;
-}
-
-/**
  * @brief Get a random number
  * @param random Random number generator
  * @return Random number
@@ -324,6 +281,31 @@ static uint64_t random_get(Random *random) {
  */
 static inline void random_seed(Random *random, const uint64_t seed) {
 	*random = (seed & MASK48);
+}
+
+/**
+ * @brief Get available memory
+ * @return Available memory in MB
+ */
+static inline uint64_t get_available_memory() {
+#if defined(__linux__)
+	struct sysinfo info;
+	if (sysinfo(&info) == 0) {
+		return (info.freeram * info.mem_unit) >> 20;
+	}
+#endif
+	return 1024; // 1GB by default expected to be enough for most systems
+}
+
+/**
+ * @brief Get number of processors
+ * @return Number of processors
+ */
+static inline uint64_t get_available_processors() {
+#if defined(__linux__)
+	 return get_nprocs();
+#endif
+	return 1;
 }
 
 /**
@@ -380,6 +362,24 @@ static inline Color color_from_char(const char c) {
  * @param c Color variable to iterate over
  */
 #define foreach_color(c) for ((c) = WHITE; (c) < COLOR_SIZE; ++(c))
+
+/**
+ * @brief Loop over each piece
+ * @param p Piece variable to iterate over
+ */
+#define foreach_piece(p) for ((p) = PAWN; (p) < PIECE_SIZE; ++(p))
+
+/**
+ * @brief Convert a char to a piece
+ * @param c Char to convert
+ * @return a Piece
+ */
+static inline Piece piece_from_char(const char c) {
+	Piece p;
+
+	foreach_piece(p) if ("PNBRQK"[p] == toupper(c)) break;
+	return p;
+}
 
 /**
  * @brief Make a square from file & rank
@@ -564,12 +564,21 @@ static inline int castling_from_char(const char c) {
 }
 
 /**
+ * @brief Get the moving piece
+ * @param move Move
+ * @return Moving piece
+ */
+static inline Piece move_piece(const Move move) {
+	return move & 7;
+}
+
+/**
  * @brief Get the source square of a move
  * @param move Move
  * @return Source square
  */
 static inline Square move_from(const Move move) {
-	return move & 63;
+	return (move >> 3) & 63;
 }
 
 /**
@@ -578,7 +587,7 @@ static inline Square move_from(const Move move) {
  * @return Destination square
  */
 static inline Square move_to(const Move move) {
-	return (move >> 6) & 63;
+	return (move >> 9) & 63;
 }
 
 /**
@@ -587,7 +596,7 @@ static inline Square move_to(const Move move) {
  * @return Promoted piece
  */
 static inline Piece move_promotion(const Move move) {
-	return move >> 12;
+	return move >> 15;
 }
 
 /**
@@ -601,10 +610,10 @@ static inline char* move_to_string(const Move move, char *s) {
 
 	if (s == NULL) s = string;
 	if (move) {
-		s[0] = (move & 7) + 'a';
-		s[1] = (move >> 3 & 7) + '1';
-		s[2] = (move >> 6 & 7) + 'a';
-		s[3] = (move >> 9 & 7) + '1';
+		s[0] = (move >>  3 & 7) + 'a';
+		s[1] = (move >>  6 & 7) + '1';
+		s[2] = (move >>  9 & 7) + 'a';
+		s[3] = (move >> 12 & 7) + '1';
 		s[4] = "\0NBRQ"[move_promotion(move)];
 		s[5] = '\0';
 	} else {
@@ -613,7 +622,6 @@ static inline char* move_to_string(const Move move, char *s) {
 
 	return s;
 }
-
 
 /**
  * @brief Compare two moves
@@ -624,6 +632,101 @@ static inline char* move_to_string(const Move move, char *s) {
 static int move_compare(const void *a, const void *b) {
 	char string_a[8], string_b[8];
 	return strcmp(move_to_string(*(Move*)a, string_a), move_to_string(*(Move*)b, string_b));
+}
+
+/**
+ *  @brief Measure time in seconds as a double.
+ *  @return Elapsed Time in seconds
+ */
+static inline double chrono(void) {
+	struct timespec t;
+	timespec_get(&t, TIME_UTC);
+	return 0.000000001 * t.tv_nsec + t.tv_sec;
+}
+
+/**
+ *  @brief Memory error.
+ *  @param function Function name
+ */
+static void memory_error(const char *function) {
+	fprintf(stderr, "Fatal Error: memory allocation failure in %s\n", function);
+	exit(EXIT_FAILURE);
+}
+
+/**
+ *  @brief Parse error.
+ *  @param string Input string
+ *  @param done   Done string
+ *  @param msg    Message string
+ */
+static void parse_error(const char *string, const char *done, const char *msg) {
+	size_t n;
+
+	fprintf(stderr, "\nError in %s '%s'\n", msg, string);
+	n = 11 + strlen(msg) + done - string;
+	if (n > 0 && n < 256) {
+		while (n--) putc('-', stderr);
+		putc('^', stderr); putc('\n', stderr); putc('\n', stderr);
+	}
+	exit(EXIT_FAILURE);
+}
+
+/**
+ *  @brief Skip spaces.
+ *  @param string String to skip spaces in
+ *  @return Pointer to first non-space character
+ */
+static char *parse_next(const char *string) {
+	while (isspace((int)*string)) ++string;
+	return (char*) string;
+}
+
+/**
+ * @brief Parse a word.
+ *
+ * @param string String to parse
+ * @param word String receiving a copy of the parsed word.
+ * @param n word string capacity.
+ * NOTE: It is assumed that w is big enough to contains the word copy.
+ * @return The remaining of the input string.
+ */
+char* parse_word(const char *string, char *word, size_t n)
+{
+	string = parse_next(string);
+	while(*string && !isspace(*string) && --n) *word++ = *string++;
+	*word = '\0';
+	return (char*) string;
+}
+
+static inline Piece board_get_piece(const Board*, const Square);
+
+/**
+ * @brief Parse a move.
+ *
+ * @param string String to parse
+ * @return The remaining of the input string.
+ */
+char *parse_move(char *string, const Board *board, Move *move) {
+	char word[8];
+	Square from, to;
+	Piece promotion;
+
+	string = parse_word(string, word, 8);
+	if (*word == '\0') return NULL;
+
+	from = square(word[0] - 'a', word[1] - '1');
+	to = square(word[2] - 'a', word[3] - '1');
+	promotion = word[4] ? piece_from_char(word[4]) : PAWN;
+
+    //
+/* 	if (!board->chess960 && cpiece_piece(board->cpiece[from]) == KING) {
+		if (to == from + 2) to = from + 3;
+		if (to == from - 2) to = from - 4;
+	}
+*/
+	*move = board_get_piece(board, from) | (from << 3) | (to << 9) | (promotion << 15);
+
+	return string;
 }
 
 /**
@@ -684,6 +787,17 @@ static inline Bitboard rook_attack(const Bitboard pieces, const Square x, const 
 }
 
 /**
+ * @brief Generate Queen attack
+ * @param pieces Bitboard of pieces
+ * @param x Queen's square
+ * @param target Bitboard of target squares
+ * @return Bitboard of rook attack
+ */
+static inline Bitboard queen_attack(const Bitboard pieces, const Square x, const Bitboard target) {
+	return rook_attack(pieces, x, target) | bishop_attack(pieces, x, target);
+}
+
+/**
  * @brief Generate king attack
  * @param x King's square
  * @param target Bitboard of target squares
@@ -691,6 +805,51 @@ static inline Bitboard rook_attack(const Bitboard pieces, const Square x, const 
  */
 static inline Bitboard king_attack(const Square x, const Bitboard target) {
 	return MASK[x].king & target;
+}
+
+/**
+ * @brief Get a piece located at a specified square
+ * @param board The board
+ * @param x square
+ * @return A Piece
+ */
+static inline Piece board_get_piece(const Board *board, const Square x) {
+	Bitboard b = square_to_bit(x);
+	Piece p;
+
+	foreach_piece(p) {
+		if (b & board->piece[p]) return p;
+	}
+	return PIECE_SIZE;
+}
+
+/**
+ * @brief Get the color of a piece located at a specified square
+ * @param board The board
+ * @param x square
+ * @return A Color.
+ */
+static inline Color board_get_color(const Board *board, const Square x) {
+	Bitboard b = square_to_bit(x);
+	Color c;
+
+	foreach_color(c) {
+		if (b & board->color[c]) return c;
+	}
+	return COLOR_SIZE;
+}
+
+
+/**
+ * @brief Get a colored piece located at a specified square
+ * @param board The board
+ * @param x square
+ * @return A CPiece
+ */
+static inline CPiece board_get_cpiece(const Board *board, const Square x) {
+	Piece p = board_get_piece(board, x);
+	Color c = board_get_color(board, x);
+	return c == COLOR_SIZE ? EMPTY : cpiece_make(p, c);
 }
 
 /**
@@ -719,11 +878,18 @@ static inline void key_xor(Key *key, const Key *k) {
  * @param board Board to set key from
  */
 static void key_set(Key *key, const Board *board) {
-	int x;
-
 	*key = KEY_PLAYER[board->player];
-	foreach_square (x) {
-		key_xor(key, &KEY_SQUARE[x][board->cpiece[x]]);
+	Color c;
+	Piece p;
+
+	foreach_color (c)
+	foreach_piece (p) {
+		Bitboard b = (board->color[c] & board->piece[p]);
+		CPiece cp = cpiece_make(p, c);
+		while (b) {
+			Square x = square_next(&b);
+			key_xor(key, &KEY_SQUARE[x][cp]);
+		}
 	}
 	key_xor(key, &KEY_CASTLING[board->castling]);
 	key_xor(key, &KEY_ENPASSANT[board->enpassant]);
@@ -736,12 +902,13 @@ static void key_set(Key *key, const Board *board) {
  * @param move Move to update key with
  */
 static void key_update(Key *key, const Board *board, const Move move) {
+	const Bitboard occupied = board->color[WHITE] | board->color[BLACK];
 	const Square from = move_from(move);
 	const Square to = move_to(move);
-	CPiece cp = board->cpiece[from];
-	Piece p = cpiece_piece(cp);
-	const Color c = cpiece_color(cp);
-	const CPiece victim = board->cpiece[to];
+	const Color c = board->player;
+	const Color o = opponent(c);
+	Piece p = move_piece(move);
+	CPiece cp = cpiece_make(p, c);
 	Square enpassant = ENPASSANT_NONE;
 
 	*key = board->key;
@@ -750,7 +917,10 @@ static void key_update(Key *key, const Board *board, const Move move) {
 	key_xor(key, &KEY_SQUARE[from][cp]);
 	key_xor(key, &KEY_SQUARE[to][cp]);
 	// capture
-	if (victim) key_xor(key, &KEY_SQUARE[to][victim]);
+	if (occupied & square_to_bit(to)) {
+		const CPiece victim = cpiece_make(board_get_piece(board, to), o);
+		key_xor(key, &KEY_SQUARE[to][victim]);
+	}
 	// pawn move
 	if (p == PAWN) {
 		if ((p = move_promotion(move))) {
@@ -758,18 +928,17 @@ static void key_update(Key *key, const Board *board, const Move move) {
 			key_xor(key, &KEY_SQUARE[to][cpiece_make(p, c)]);
 		} else if (board->enpassant == to) {
 			Square x = square(file(to), rank(from));
-			key_xor(key, &KEY_SQUARE[x][cpiece_make(PAWN, opponent(c))]);
-		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (board->color[opponent(c)] & board->piece[PAWN]))) enpassant = (from + to) / 2;
+			key_xor(key, &KEY_SQUARE[x][cpiece_make(PAWN, o)]);
+		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (board->color[o] & board->piece[PAWN]))) enpassant = (from + to) / 2;
 	// castling
 	} else if (p == KING) {
+		const CPiece rook = cpiece_make(ROOK, c);
 		if (to == from + 2) {
-			cp = board->cpiece[from + 3];
-			key_xor(key, &KEY_SQUARE[from + 3][cp]);
-			key_xor(key, &KEY_SQUARE[from + 1][cp]);
+			key_xor(key, &KEY_SQUARE[from + 3][rook]);
+			key_xor(key, &KEY_SQUARE[from + 1][rook]);
 		} else if (to == from - 2) {
-			cp = board->cpiece[from - 4];
-			key_xor(key, &KEY_SQUARE[from - 4][cp]);
-			key_xor(key, &KEY_SQUARE[from - 1][cp]);
+			key_xor(key, &KEY_SQUARE[from - 4][rook]);
+			key_xor(key, &KEY_SQUARE[from - 1][rook]);
 		}
 	}
 	// miscellaneous
@@ -950,14 +1119,11 @@ static inline bool board_enpassant(const Board *board) {
  */
 static inline void board_deplace_piece(Board *board, const Square from, const Square to) {
 	const Bitboard b = square_to_bit(from) ^ square_to_bit(to);
-	const CPiece cp = board->cpiece[from];
-	const Piece p = cpiece_piece(cp);
-	const Color c = cpiece_color(cp);
+	const Piece p = board_get_piece(board, from);
+	const Color c = board_get_color(board, from);
 
 	board->piece[p] ^= b;
 	board->color[c] ^= b;
-	board->cpiece[to] = cp;
-	board->cpiece[from] = EMPTY;
 }
 
 /**
@@ -1032,19 +1198,7 @@ static inline void board_clear(Board *board) {
  * @param board Board to initialize
  */
 static void board_init(Board *board) {
-	static const uint8_t cpiece[BOARD_SIZE] = {
-		WROOK, WKNIGHT, WBISHOP, WQUEEN, WKING, WBISHOP, WKNIGHT, WROOK,
-		WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,WPAWN,
-		EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,
-		EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,
-		EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,
-		EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,EMPTY,
-		BPAWN,BPAWN,BPAWN,BPAWN,BPAWN,BPAWN,BPAWN,BPAWN,
-		BROOK, BKNIGHT, BBISHOP, BQUEEN, BKING, BBISHOP, BKNIGHT, BROOK
-	};
-
 	board_clear(board);
-	memcpy(board->cpiece, cpiece, BOARD_SIZE);
 	board->piece[PAWN] =   0x00ff00000000ff00ull;
 	board->piece[KNIGHT] = 0x4200000000000042ull;
 	board->piece[BISHOP] = 0x2400000000000024ull;
@@ -1090,8 +1244,8 @@ static void board_set(Board *board, char *string) {
 		} else {
 			if (f > 8) parse_error(string, s, "FEN: file overflow");
 			x = square(f, r);
-			board->cpiece[x] = p = cpiece_from_char(*s);
-			if (board->cpiece[x] == CPIECE_SIZE) parse_error(string, s, "FEN: bad piece");
+			p = cpiece_from_char(*s);
+			if (p == CPIECE_SIZE) parse_error(string, s, "FEN: bad piece");
 			board->piece[cpiece_piece(p)] |= square_to_bit(x);
 			board->color[cpiece_color(p)] |= square_to_bit(x);
 			if (cpiece_piece(p) == KING) board->x_king[cpiece_color(p)] = x;
@@ -1115,13 +1269,15 @@ static void board_set(Board *board, char *string) {
 		}
 	}
 	// correct castling
-	if (board->cpiece[E1] == WKING) {
-		if (board->cpiece[H1] != WROOK) board->castling &= ~1;
-		if (board->cpiece[A1] != WROOK) board->castling &= ~2;
+	if (board->x_king[WHITE] == E1) {
+		uint64_t rooks = board->color[WHITE] & board->piece[ROOK];
+		if ((rooks & square_to_bit(H1)) == 0) board->castling &= ~1;
+		if ((rooks & square_to_bit(A1)) == 0) board->castling &= ~2;
 	} else board->castling &= ~3;
-	if (board->cpiece[E8] == BKING) {
-		if (board->cpiece[H8] != BROOK) board->castling &= ~4;
-		if (board->cpiece[A8] != BROOK) board->castling &= ~8;
+	if (board->x_king[BLACK] == E8) {
+		uint64_t rooks = board->color[BLACK] & board->piece[ROOK];
+		if ((rooks & square_to_bit(H8)) == 0) board->castling &= ~1;
+		if ((rooks & square_to_bit(A8)) == 0) board->castling &= ~2;
 	} else board->castling &= ~12;
 	// en passant
 	x = ENPASSANT_NONE;
@@ -1145,12 +1301,12 @@ static void board_copymake(const Board *board, const Move move, const Key *key, 
 	const Square from = move_from(move);
 	const Square to = move_to(move);
 	const Square enpassant = board->enpassant;
-	CPiece cp = board->cpiece[from];
-	Piece p = cpiece_piece(cp);
-	const Color c = cpiece_color(cp);
 	const Bitboard b_from = square_to_bit(from);
 	const Bitboard b_to = square_to_bit(to);
-	const CPiece victim = board->cpiece[to];
+	const Bitboard occupied = board->color[WHITE] | board->color[BLACK];
+	Piece p = move_piece(move);
+	const Color c = board->player;
+	const Color o = opponent(c);
 	Square x;
 	Bitboard b;
 
@@ -1163,29 +1319,28 @@ static void board_copymake(const Board *board, const Move move, const Key *key, 
 	next->piece[p] ^= b_from;
 	next->piece[p] ^= b_to;
 	next->color[c] ^= b_from | b_to;
-	next->cpiece[from] = EMPTY;
-	next->cpiece[to] = cp;
+
 	// capture
-	if (victim) {
-		next->piece[cpiece_piece(victim)] ^= b_to;
-		next->color[cpiece_color(victim)] ^= b_to;
+	if (occupied & b_to) {
+		const Piece victim = board_get_piece(board, to);
+		next->piece[victim] ^= b_to;
+		next->color[o] ^= b_to;
 	}
+
 	// special pawn move
 	if (p == PAWN) {
 		if ((p = move_promotion(move))) {
-			cp = cpiece_make(p, c);
 			next->piece[PAWN] ^= b_to;
 			next->piece[p] ^= b_to;
-			next->cpiece[to] = cp;
 		} else if (enpassant == to) {
 			x = square(file(to), rank(from));
 			b = square_to_bit(x);
 			next->piece[PAWN] ^= b;
-			next->color[opponent(c)] ^= b;
-			next->cpiece[x] = EMPTY;
-		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (next->color[opponent(c)] & next->piece[PAWN]))) {
+			next->color[o] ^= b;
+		} else if (abs(to - from) == 16 && (MASK[to].enpassant & (next->color[o] & next->piece[PAWN]))) {
 			next->enpassant = (from + to) / 2;
 		}
+
 	// king move
 	} else if (p == KING) {
 		next->x_king[c] = to;
@@ -1216,7 +1371,7 @@ static void board_print(const Board *board, FILE *output) {
 		for (f = 0; f <= 7; ++f) {
 			x = square(f, r);
 			if (f == 0) fprintf(output, "%1d ", r + 1);
-			fputc(p[board->cpiece[x]], output); fputc(' ', output);
+			fputc(p[board_get_cpiece(board, x)], output); fputc(' ', output);
 			if (f == 7) fprintf(output, "%1d\n", r + 1);
 		}
 	}
@@ -1252,12 +1407,17 @@ static bool board_is_square_attacked(const Board *board, const Square x, const C
 /**
  * Append a move to an array of moves
  * @param move Array of moves
+ * @param piece Moving piece
  * @param from From square
  * @param to To square
  * @return Pointer to next move
  */
-static inline Move* push_move(Move *move, const Square from, const Square to) {
-	*move++ = from | (to << 6);
+static inline Move* push_move(Move *move, const Piece piece, const Square from, const Square to) {
+	assert(piece >= PAWN && piece < PIECE_SIZE);
+	assert(from >= A1 && from <= H8);
+	assert(to >= A1 && to <= H8);
+
+	*move++ = piece | (from << 3) | (to << 9);
 	return move;
 }
 
@@ -1269,7 +1429,10 @@ static inline Move* push_move(Move *move, const Square from, const Square to) {
  * @return Pointer to next move
  */
 static inline Move* push_promotion(Move *move, const Square from, const Square to) {
-	const Move m = from | (to << 6);
+	const Move m = PAWN | (from << 3) | (to << 9);
+
+	assert(from >= A1 && from <= H8);
+	assert(to >= A1 && to <= H8);
 
 	*move++ = m | QUEEN_PROMOTION;
 	*move++ = m | KNIGHT_PROMOTION;
@@ -1285,12 +1448,12 @@ static inline Move* push_promotion(Move *move, const Square from, const Square t
  * @param from From square
  * @return Pointer to next move
  */
-static inline Move* push_moves(Move *move, Bitboard attack, const Square from) {
+static inline Move* push_moves(Move *move, Bitboard attack, const Piece piece, const Square from) {
 	Square to;
 
 	while (attack) {
 		to = square_next(&attack);
-		move = push_move(move, from, to);
+		move = push_move(move, piece , from, to);
 	}
 	return move;
 }
@@ -1305,7 +1468,7 @@ static inline Move* push_moves(Move *move, Bitboard attack, const Square from) {
 static inline Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) {
 	while (attack) {
 		const Square to = square_next(&attack);
-		move = push_move(move, to - dir, to);
+		move = push_move(move, PAWN, to - dir, to);
 	}
 	return move;
 }
@@ -1319,7 +1482,7 @@ static inline Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) 
  */
 static inline Move *push_promotions(Move *move, Bitboard attack, const int dir) {
 	while (attack) {
-	    const Square to = square_next(&attack);
+		const Square to = square_next(&attack);
 		move = push_promotion(move, to - dir, to);
 	}
 	return move;
@@ -1422,12 +1585,14 @@ static int count_moves(const Board *board, const bool do_quiet) {
 		to = board->enpassant;
 		ep = to - pawn_push;
 		from = ep - 1;
-		if (file(to) > 0 && board->cpiece[from] == cpiece_make(PAWN, c)) {
+		attack = square_to_bit(from);
+		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & attack)) {
 			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
 		}
 		from = ep + 1;
-		if (file(to) < 7 && board->cpiece[from] == cpiece_make(PAWN, c)) {
+		attack = square_to_bit(from);
+		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & attack)) {
 			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
 		}
@@ -1533,55 +1698,68 @@ static int generate_moves(const Board *board, Move *move, const bool do_quiet) {
 				&& (occupied & MASK[k].between[k + 3]) == 0
 				&& !board_is_square_attacked(board, k + 1, o, occupied)
 				&& !board_is_square_attacked(board, k + 2, o, occupied)) {
-					move = push_move(move, k, k + 2);
+					move = push_move(move, KING, k, k + 2);
 			}
 			if ((board->castling & CAN_CASTLE_QUEENSIDE[c])
 				&& (occupied & MASK[k].between[k - 4]) == 0
 				&& !board_is_square_attacked(board, k - 1, o, occupied)
 				&& !board_is_square_attacked(board, k - 2, o, occupied)) {
-					move = push_move(move, k, k - 2);
+					move = push_move(move, KING, k, k - 2);
 			}
 		}
+
 		// pawn (pinned)
 		piece = board->piece[PAWN] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
 			if (d == abs(pawn_left) && (square_to_bit(to = from + pawn_left) & pawn_attack(from, c, enemy))) {
-				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move,from, to);
+				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move, PAWN, from, to);
 			} else if (d == abs(pawn_right) && (square_to_bit(to = from + pawn_right) & pawn_attack(from, c, enemy))) {
-				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move,from, to);
+				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move, PAWN, from, to);
 			}
 			if (do_quiet && d == abs(pawn_push) && (square_to_bit(to = from + pawn_push) & empty)) {
-				move = push_move(move, from, to);
+				move = push_move(move, PAWN, from, to);
 				if (is_on_second_rank(from, c) && (square_to_bit(to += pawn_push) & empty)) {
-					move = push_move(move, from, to);
+					move = push_move(move, PAWN, from, to);
 				}
 			}
 		}
-		// bishop or queen (pinned)
-		piece = bq & pinned;
+		// bishop (pinned)
+		piece = board->piece[BISHOP] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
 			attack = 0;
 			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
 			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			move = push_moves(move, attack, from);
+			move = push_moves(move, attack, BISHOP, from);
 		}
-		// rook or queen (pinned)
-		piece = rq & pinned;
+		// rook (pinned)
+		piece = board->piece[ROOK] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
 			attack = 0;
 			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
 			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			move = push_moves(move, attack, from);
+			move = push_moves(move, attack, ROOK, from);
+		}
+		// queen (pinned)
+		piece = board->piece[QUEEN] & pinned;
+		while (piece) {
+			from = square_next(&piece);
+			d = dir[from];
+			attack = 0;
+			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
+			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
+			else if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
+			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
+			move = push_moves(move, attack, QUEEN, from);
 		}
 	}
-	// common moves
 
+	// common moves
 	target = enemy; if (do_quiet) target |= empty;
 
 	// enpassant capture
@@ -1589,17 +1767,19 @@ static int generate_moves(const Board *board, Move *move, const bool do_quiet) {
 		to = board->enpassant;
 		ep = to - pawn_push;
 		from = ep - 1;
-		if (file(to) > 0 && board->cpiece[from] == cpiece_make(PAWN, c)) {
+		attack = square_to_bit(from);
+		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & attack)) {
 			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) {
-				move = push_move(move, from, to);
+				move = push_move(move, PAWN, from, to);
 			}
 		}
 		from = ep + 1;
-		if (file(to) < 7 && board->cpiece[from] == cpiece_make(PAWN, c)) {
+		attack = square_to_bit(from);
+		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & attack)) {
 			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) {
-				move = push_move(move, from, to);
+				move = push_move(move, PAWN, from, to);
 			}
 		}
 	}
@@ -1627,23 +1807,31 @@ static int generate_moves(const Board *board, Move *move, const bool do_quiet) {
 	while (piece) {
 		from = square_next(&piece);
 		attack = knight_attack(from, target);
-		move = push_moves(move, attack, from);
+		move = push_moves(move, attack, KNIGHT, from);
 	}
 
-	// bishop or queen
-	piece = bq & unpinned;
+	// bishop
+	piece = board->piece[BISHOP] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
 		attack = bishop_attack(occupied, from, target);
-		move = push_moves(move, attack, from);
+		move = push_moves(move, attack, BISHOP, from);
 	}
 
-	// rook or queen
-	piece = rq & unpinned;
+	// rook
+	piece = board->piece[ROOK] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
 		attack = rook_attack(occupied, from, target);
-		move = push_moves(move, attack, from);
+		move = push_moves(move, attack, ROOK, from);
+	}
+
+	// queen
+	piece = board->piece[QUEEN] & unpinned;
+	while (piece) {
+		from = square_next(&piece);
+		attack = queen_attack(occupied, from, target);
+		move = push_moves(move, attack, QUEEN, from);
 	}
 
 	// king
@@ -1652,7 +1840,7 @@ static int generate_moves(const Board *board, Move *move, const bool do_quiet) {
 	while (attack) {
 		to = square_next(&attack);
 		if (!board_is_square_attacked(board, to, o, occupied_no_king)) {
-			move = push_move(move, k, to);
+			move = push_move(move, KING, k, to);
 		}
 	}
 
@@ -2090,6 +2278,7 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 		{"17. Self stalemate", "K1k5/8/P7/8/8/8/8/8 w - - 0 1", 2217, 6},
 		{"18. Stalemate/Checkmate", "8/k1P5/8/1K6/8/8/8/8 w - - 0 1", 567584, 7},
 		{"19. Double check", "8/8/2k5/5q2/5n2/8/5K2/8 b - - 0 1", 23527, 4},
+		{"20.", "rnbqkb1r/pp1p1ppp/2p5/4P3/2B5/8/PPP1NnPP/RNBQK2R w KQkq - 0 6", 94854874131, 7},
 		{NULL, NULL, 0, 0}
 	};
 
@@ -2120,7 +2309,7 @@ int main(int argc, char **argv) {
 	MoveArray ma;
 	uint64_t count, total = 0;
 	uint64_t seed = 0xA170EBA;
-	char *fen = NULL;
+	char *fen = NULL, *moves = NULL;
 	uint32_t depth = 6, hash_size = 0, n_threads = 1, n_repetition = 1;
 	Move move;
 	bool div = false, loop = false, verbose = true, do_test = false;
@@ -2133,9 +2322,14 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--depth") || !strcmp(argv[i], "-d")) depth = atoi(argv[++i]);
 		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
 		else if (!strcmp(argv[i], "--div")) div = true;
-		else if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
+		else if (!strcmp(argv[i], "--fast")) {
+			option.bulk = true;
+			hash_size = get_available_memory();
+			n_threads = get_available_processors();
+		} else if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
 		else if (i < argc - 1 && (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-h"))) hash_size = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--kiwipete") || !strcmp(argv[i], "-k")) fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+		else if (i < argc - 1 && (!strcmp(argv[i], "--moves") || !strcmp(argv[i], "-m"))) moves = argv[++i];
 		else if (!strcmp(argv[i], "--loop") || !strcmp(argv[i], "-l")) loop = true;
 		else if (!strcmp(argv[i], "--quiet") || !strcmp(argv[i], "-q")) verbose = false;
 		else if (i < argc - 1 && (!strcmp(argv[i], "--repeat") || !strcmp(argv[i], "-r"))) n_repetition=atoi(argv[++i]);
@@ -2149,10 +2343,12 @@ int main(int argc, char **argv) {
 			puts("\t--capture|-c            Generate only captures, promotions & check evasions.");
 			puts("\t[--depth|-d] <depth>    Test up to this depth (default = 6).");
 			puts("\t--div                   Print a node count for each move.");
-			puts("\t--fen|-f <fen>          Use the position indicated in FEN format (default=starting position).");
+			puts("\t--fast                  Automatically set highest settings.");
+			puts("\t--fen|-f <fen>          Use the position indicated in FEN format (default = starting position).");
 			puts("\t--hash|-h <size>        Use a hashtable with <size> Megabytes (default = 0, no hashtable).");
 			puts("\t--help|-?               Print this message.");
 			puts("\t--kiwipete|-k           Use the kiwipete position.");
+			puts("\t--moves|-m              Play a series of moves to build the position to use.");
 			puts("\t--loop|-l               Loop from depth 1 to <depth>.");
 			puts("\t--quiet|-q              Disable verbose output.");
 			puts("\t--repeat|-r <n>         Repeat the test <n> time (default = 1).");
@@ -2181,6 +2377,13 @@ int main(int argc, char **argv) {
 	// board initialization
 	board_init(&board);
 	if (fen) board_set(&board, fen);
+	if (moves) {
+		while ((moves = parse_move(moves, &board, &move)) != NULL) {
+			key_update(&key, &board, move);
+			board_copymake(&board, move, &key, &next);
+			board = next;
+		}
+	}
 
 	if (depth < 1) depth = 1;
 	if (depth > 63) depth = 63;
@@ -2220,7 +2423,7 @@ int main(int argc, char **argv) {
 					total += count;
 					partial_time += chrono();
 					total_time += partial_time;
-					printf("%5s %16" PRIu64 " leaves in %10.3f s %12.0f leaves/s\n", move_to_string(move, NULL), count, partial_time, count / partial_time);
+					printf("%5s %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", move_to_string(move, NULL), count, partial_time, count / partial_time);
 				}
 			}
 		}
@@ -2233,11 +2436,11 @@ int main(int argc, char **argv) {
 				total += count;
 				partial_time += chrono();
 				total_time += partial_time;
-				printf("perft %2d : %16" PRIu64 " leaves in %10.3f s %12.0f leaves/s\n", d, count, partial_time, count / partial_time);
+				printf("perft %2d : %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", d, count, partial_time, count / partial_time);
 			}
 		}
 	}
-	if (div || loop || n_repetition > 1) printf("total    : %16" PRIu64 " leaves in %10.3f s %12.0f leaves/s\n", total, total_time, total / total_time);
+	if (div || loop || n_repetition > 1) printf("total    : %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", total, total_time, total / total_time);
 
 
 	hash_destroy(hashtable);
