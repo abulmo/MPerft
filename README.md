@@ -8,10 +8,12 @@ Enumerate moves. The following options are available:
 	--capture|-c            Generate only captures, promotions & check evasions.
 	[--depth|-d] <depth>    Test up to this depth (default = 6).
 	--div                   Print a node count for each move.
-	--fen|-f <fen>          Use the position indicated in FEN format (default=starting position).
+	--fast                  Automatically set highest settings.
+	--fen|-f <fen>          Use the position indicated in FEN format (default = starting position).
 	--hash|-h <size>        Use a hashtable with <size> Megabytes (default = 0, no hashtable).
 	--help|-?               Print this message.
 	--kiwipete|-k           Use the kiwipete position.
+	--moves|-m <moves>      Play a series of moves to build the position to use.
 	--loop|-l               Loop from depth 1 to <depth>.
 	--quiet|-q              Disable verbose output.
 	--repeat|-r <n>         Repeat the test <n> time (default = 1).
@@ -44,13 +46,12 @@ build-icx.bat native
 ```
 
 ## Example
-To run perft at depth 9 with bulk counting, a hashtable of 256 Mbytes and 32 threads, you can type:
 
 ```
-$ mperft -d 9 -b -h 256 -t 32
-Magic Perft version 3.2 (c) Richard Delorme 2020 - 2026
+$ mperft -d 12 --fast -l
+Magic Perft version 4.0 (c) Richard Delorme 2020 - 2026
 Bitboard move generation based on magic (pext) bitboards
-Perft setting: hashtable size: 256 Mbytes (16777220 entries); with 32 threads; with bulk counting;
+Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 threads; with bulk counting;
   a b c d e f g h
 8 r n b q k b n r 8
 7 p p p p p p p p 7
@@ -62,8 +63,20 @@ Perft setting: hashtable size: 256 Mbytes (16777220 entries); with 32 threads; w
 1 R N B Q K B N R 1
   a b c d e f g h
 w, KQkq
-perft  9 :   2439530234167 leaves in      8.452 s 288633848809 leaves/s
-full time:      8.629 s
+perft  1 :                 20 leaves in      0.000 s       11983726 leaves/s
+perft  2 :                400 leaves in      0.000 s      209715200 leaves/s
+perft  3 :               8902 leaves in      0.000 s      377148426 leaves/s
+perft  4 :             197281 leaves in      0.000 s      573427919 leaves/s
+perft  5 :            4865609 leaves in      0.001 s     7249677901 leaves/s
+perft  6 :          119060324 leaves in      0.004 s    29868723799 leaves/s
+perft  7 :         3195901860 leaves in      0.044 s    72115344852 leaves/s
+perft  8 :        84998978956 leaves in      0.536 s   158707039166 leaves/s
+perft  9 :      2439530234167 leaves in      5.897 s   413669140306 leaves/s
+perft 10 :     69352859712417 leaves in     63.779 s  1087387524614 leaves/s
+perft 11 :   2097651003696806 leaves in    837.672 s  2504143445218 leaves/s
+perft 12 :  62854969236701747 leaves in  16914.459 s  3716049685686 leaves/s
+total    :  65024500949358489 leaves in  17822.392 s  3648472073458 leaves/s
+full time:  17860.911 s
 ```
 
 ## History
@@ -74,4 +87,3 @@ full time:      8.629 s
 - Version 3.1 Remove some OS/platform dependencies. Alphabetically sort the move with the --div command.
 - Version 3.2 Remove more OS/platform dependencies. Fix a bug (free() incompatibility with _aligned_malloc()). Faster executable for Windows.
 - Version 4.0 Code fix & optimisation
-
