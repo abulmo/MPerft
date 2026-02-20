@@ -2348,7 +2348,7 @@ int main(int argc, char **argv) {
 			puts("\t--hash|-h <size>        Use a hashtable with <size> Megabytes (default = 0, no hashtable).");
 			puts("\t--help|-?               Print this message.");
 			puts("\t--kiwipete|-k           Use the kiwipete position.");
-			puts("\t--moves|-m              Play a series of moves to build the position to use.");
+			puts("\t--moves|-m <moves>      Play a serie of moves to build the position to use.");
 			puts("\t--loop|-l               Loop from depth 1 to <depth>.");
 			puts("\t--quiet|-q              Disable verbose output.");
 			puts("\t--repeat|-r <n>         Repeat the test <n> time (default = 1).");
