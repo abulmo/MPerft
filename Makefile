@@ -1,5 +1,4 @@
 #libs
-LIBS = -lm
 MAKE = make
 RM = rm -f
 BIN = .
@@ -29,7 +28,6 @@ ifeq ($(CC),clang)
 		CFLAGS += -O3 -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
 		CFLAGS += -O3 -fno-inline -DNDEBUG
-		LIBS += -lprofiler
 	else
 		CFLAGS += -O0 -g -fno-inline -ftrapv
 	endif
@@ -47,7 +45,6 @@ ifeq ($(CC),icx)
 		CFLAGS += -O3 -flto -DNDEBUG
 	else ifeq ($(BUILD),profile)
 		CFLAGS += -O3 -fno-inline -DNDEBUG
-		LIBS += -lprofiler
 	else
 		CFLAGS += -O0 -g -fno-inline -ftrapv
 	endif
@@ -94,13 +91,13 @@ endif
 #commands
 pgo :
 	$(MAKE) clean
-	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(BIN)/$(EXE) $(LIBS)
+	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(BIN)/$(EXE)
 	cd $(BIN); ./$(EXE) -d 7 -b -t 4 -h 256 -q;
 	$(PGO_MERGE)
-	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(BIN)/$(EXE) $(LIBS)
+	$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(BIN)/$(EXE)
 
 no-pgo :
-	$(CC) $(CFLAGS) -march=$(ARCH) mperft.c -o $(BIN)/$(EXE) $(LIBS)
+	$(CC) $(CFLAGS) -march=$(ARCH) mperft.c -o $(BIN)/$(EXE)
 
 
 prof:
