@@ -58,9 +58,7 @@
 
 // fast PEXT availability
 #if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
-	#define HAS_PEXT true
-#else
-	#define HAS_PEXT false
+	#define HAS_PEXT
 #endif
 
 /** Types */
@@ -2430,8 +2428,11 @@ int main(int argc, char **argv) {
 
 	if (verbose) {
 		puts("Magic Perft version 4.0 (c) Richard Delorme 2020 - 2026");
-		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards");
-		else puts("Bitboard move generation based on magic bitboards");
+		#ifdef HAS_PEXT
+			puts("Bitboard move generation based on magic (pext) bitboards");
+		#else
+			puts("Bitboard move generation based on magic bitboards");
+		#endif
 		printf("Perft setting: ");
 		if (hash_size == 0) printf("no hashing; ");
 		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), hashtable->mask + BUCKET_SIZE + 1);
