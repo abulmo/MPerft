@@ -32,6 +32,12 @@
 	#include <sys/sysinfo.h>
 #endif
 
+#if defined(__APPLE__) || defined(__FreeBSD__)
+	#include <sys/types.h>
+	#include <sys/sysctl.h>
+	#include <os/proc.h>
+#endif
+
 // include stdbit.h if available, otherwise partially implement it.
 #if __has_include(<stdbit.h>)
 	#include <stdbit.h>
@@ -41,23 +47,28 @@
 		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __popcnt64(x); }
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __popcnt64(~x); }
 		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? _tzcnt_u64(x) : 64; }
-		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __lzcnt64(x)) : x;}
+		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ULL << (63 - __lzcnt64(x)) : x;}
 	#elif defined(__GNUC__)
 		static inline unsigned int stdc_count_ones_ull(const unsigned long long int x) { return __builtin_popcountll(x); }
 		static inline unsigned int stdc_count_zeros_ull(const unsigned long long int x) { return __builtin_popcountll(~x); }
 		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? __builtin_ctzll(x) : 64; }
-		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ull << (63 - __builtin_clzll(x)) : x;}
+		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ULL << (63 - __builtin_clzll(x)) : x;}
 	#endif
 #endif
 
 // fast PEXT availability
 #if (defined(__BMI2__) && !defined(__znver1__) && !defined(__znver2__))
-	#define HAS_PEXT 1
+	#define HAS_PEXT true
+#else
+	#define HAS_PEXT false
 #endif
 
 /** Types */
-/** Limis: Game size & Move size */
-typedef enum {GAME_SIZE = 4096, MOVE_SIZE = 256} Limits;
+/** Move size
+ * Note that a legal position can't have more than 218 moves:
+ * https://lichess.org/@/Tobs40/blog/why-a-reachable-position-can-have-at-most-218-playable-moves/a5xdxeqs
+ */
+enum : size_t { MOVE_SIZE = 256 };
 
 /** Bitboard: 64-bit unsigned integer representing a bitboard */
 typedef uint64_t Bitboard;
@@ -66,14 +77,13 @@ typedef uint64_t Bitboard;
 typedef uint64_t Random;
 
 /** Color: Enum representing the color of a piece */
-typedef enum { WHITE, BLACK, COLOR_SIZE } Color;
+typedef enum : int { WHITE, BLACK, COLOR_SIZE } Color;
 
 /** PerftLimits: Enum representing the limits to split the search or to probe the hash */
-typedef enum { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3, MIN_HASH_DEPTH = 3 } PerftLimits;
+enum : int { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3, MIN_HASH_DEPTH = 3 };
 
 /** Square: Enum representing the squares on the board */
-typedef enum
-{
+typedef enum : int {
 	A1, B1, C1, D1, E1, F1, G1, H1,
 	A2, B2, C2, D2, E2, F2, G2, H2,
 	A3, B3, C3, D3, E3, F3, G3, H3,
@@ -86,13 +96,13 @@ typedef enum
 } Square;
 
 /** Piece: Enum representing the pieces on the board */
-typedef enum { PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PIECE_SIZE } Piece;
+typedef enum : int { PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING, PIECE_SIZE } Piece;
 
 /** CPiece: Enum representing the pieces on the board */
-typedef enum { EMPTY, WPAWN, BPAWN, WKNIGHT, BKNIGHT, WBISHOP, BBISHOP, WROOK, BROOK, WQUEEN, BQUEEN, WKING, BKING, CPIECE_SIZE } CPiece;
+typedef enum : int { EMPTY, WPAWN, BPAWN, WKNIGHT, BKNIGHT, WBISHOP, BBISHOP, WROOK, BROOK, WQUEEN, BQUEEN, WKING, BKING, CPIECE_SIZE } CPiece;
 
-/** Promotion: Enum representing the promotions */
-typedef enum { KNIGHT_PROMOTION = KNIGHT << 15, BISHOP_PROMOTION = BISHOP << 15, ROOK_PROMOTION = ROOK << 15, QUEEN_PROMOTION = QUEEN << 15 } Promotion;
+/** Enum representing precomputing promotions */
+enum : uint32_t { KNIGHT_PROMOTION = KNIGHT << 15, BISHOP_PROMOTION = BISHOP << 15, ROOK_PROMOTION = ROOK << 15, QUEEN_PROMOTION = QUEEN << 15 };
 
 /** Move: Enum representing the moves on the board */
 typedef uint32_t Move;
@@ -135,9 +145,9 @@ typedef struct {
 	Bitboard pinned; ///< Bitboard mask for the pinned squares
 	Bitboard checkers; ///< Bitboard mask for the checkers squares
 	Key key; ///< Zobrist key
-	int ply; ///< ply counter
-	Square x_king[COLOR_SIZE]; ///< The king squares
-	Color player; ///< Current player color
+	uint8_t ply; ///< ply counter
+	uint8_t x_king[COLOR_SIZE]; ///< The king squares
+	uint8_t player; ///< Current player color
 	uint8_t castling; ///< Bitboard mask for the castling squares
 	uint8_t enpassant; ///< The enpassant square
 } Board;
@@ -206,22 +216,22 @@ typedef struct TaskPool {
 /* Constants */
 
 /** RANK: Bitboard representing a rank mask */
-const Bitboard RANK[] =  {
-	0x00000000000000ffULL, 0x000000000000ff00ULL, 0x0000000000ff0000ULL, 0x00000000ff000000ULL,
-	0x000000ff00000000ULL, 0x0000ff0000000000ULL, 0x00ff000000000000ULL, 0xff00000000000000ULL,
+static const Bitboard RANK[] =  {
+	0x00000000000000FFULL, 0x000000000000FF00ULL, 0x0000000000FF0000ULL, 0x00000000FF000000ULL,
+	0x000000FF00000000ULL, 0x0000FF0000000000ULL, 0x00FF000000000000ULL, 0xFF00000000000000ULL,
 };
 
 /** COLUMN: Bitboard representing a column mask */
-const Bitboard COLUMN[] = {
+static const Bitboard COLUMN[] = {
 	0x0101010101010101ULL, 0x0202020202020202ULL, 0x0404040404040404ULL, 0x0808080808080808ULL,
 	0x1010101010101010ULL, 0x2020202020202020ULL, 0x4040404040404040ULL, 0x8080808080808080ULL,
 };
 
 /** PUSH: Array representing the push values for each pawn color */
-const int PUSH[] = {8, -8};
+static const int PUSH[] = {8, -8};
 
 /** MASK_CASTLING: Array representing the mask for castling */
-const uint8_t MASK_CASTLING[BOARD_SIZE] = {
+static const uint8_t MASK_CASTLING[BOARD_SIZE] = {
 	13,15,15,15,12,15,15,14,
 	15,15,15,15,15,15,15,15,
 	15,15,15,15,15,15,15,15,
@@ -233,30 +243,34 @@ const uint8_t MASK_CASTLING[BOARD_SIZE] = {
 };
 
 /** CAN_CASTLE_KINGSIDE: Array representing the ability to castle kingside for each color */
-const int CAN_CASTLE_KINGSIDE[COLOR_SIZE] = {1, 4};
+static const int CAN_CASTLE_KINGSIDE[COLOR_SIZE] = {1, 4};
 
 /** CAN_CASTLE_QUEENSIDE: Array representing the ability to castle queenside for each color */
-const int CAN_CASTLE_QUEENSIDE[COLOR_SIZE] = {2, 8};
+static const int CAN_CASTLE_QUEENSIDE[COLOR_SIZE] = {2, 8};
 
 /** PROMOTION_RANK: Array representing the promotion rank for each color */
-const Bitboard PROMOTION_RANK[] = {0xff00000000000000ULL, 0x00000000000000ffULL};
+static const Bitboard PROMOTION_RANK[] = {0xff00000000000000ULL, 0x00000000000000ffULL};
 
 /** MASK48: Mask for 48-bit random number generation */
-const Random MASK48 = 0xFFFFFFFFFFFFull;
+static const Random MASK48 = 0xFFFFFFFFFFFFULL;
 
 /** BUCKET_SIZE: Size of the bucket */
-const int BUCKET_SIZE = 4;
+static const int BUCKET_SIZE = 4;
 
 /** SPINLOCK STATE Enum representing the state of a spin lock */
 enum {SL_FREE = 0, SL_BUSY = 1};
 
 /* Globals */
-Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
-Key KEY_PLAYER[COLOR_SIZE]; ///< Key for each player
-Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE]; ///< Key for each square and piece
-Key KEY_CASTLING[16]; ///< Key for each castling state
-Key KEY_ENPASSANT[BOARD_SIZE + 1]; ///< Key for each en passant state
-Key KEY_PLAY; ///< Key to switch players
+static Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
+static Key KEY_PLAYER[COLOR_SIZE]; ///< Key for each player
+static Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE]; ///< Key for each square and piece
+static Key KEY_CASTLING[16]; ///< Key for each castling state
+static Key KEY_ENPASSANT[BOARD_SIZE + 1]; ///< Key for each en passant state
+static Key KEY_PLAY; ///< Key to switch players
+
+/* function declaration */
+static inline Piece board_get_piece(const Board*, const Square);
+static uint64_t perft(const Board*, HashTable*, TaskPool*, const uint32_t, const Option*);
 
 /**
  * @brief Get a random number
@@ -264,8 +278,8 @@ Key KEY_PLAY; ///< Key to switch players
  * @return Random number
  */
 static uint64_t random_get(Random *random) {
-	const uint64_t A = 0x5deece66dull;
-	const uint64_t B = 0xbull;
+	const uint64_t A = 0x5DEECE66DULL;
+	const uint64_t B = 0xBULL;
 	uint64_t r;
 
 	*random = ((A * *random + B) & MASK48);
@@ -284,28 +298,47 @@ static inline void random_seed(Random *random, const uint64_t seed) {
 }
 
 /**
- * @brief Get available memory
+ * @brief Get available memory in Megabytes
  * @return Available memory in MB
  */
-static inline uint64_t get_available_memory() {
+static inline uint64_t get_available_memory(void) {
 #if defined(__linux__)
 	struct sysinfo info;
 	if (sysinfo(&info) == 0) {
 		return (info.freeram * info.mem_unit) >> 20;
 	}
-#endif
 	return 1024; // 1GB by default expected to be enough for most systems
+#elif defined(_WIN32)
+	MEMORYSTATUSEX statex;
+	statex.dwLength = sizeof (statex);
+	GlobalMemoryStatusEx (&statex);
+	return statex.ullAvailPhys >> 20;
+#elif defined __APPLE__
+	return os_proc_available_memory() >> 20;
+#else
+	return 1024; // 1GB by default expected to be enough for most systems
+#endif
 }
 
 /**
- * @brief Get number of processors
+ * @brief Get the number of (logical) processors
  * @return Number of processors
  */
-static inline uint64_t get_available_processors() {
+static inline int get_available_processors(void) {
 #if defined(__linux__)
 	 return get_nprocs();
-#endif
+#elif defined(_WIN32)
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	return si.dwNumberOfProcessors;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+	int count;
+	size_t size = sizeof(count);
+	if (!sysctlbyname("hw.ncpu", &count, &size, NULL, 0)) count = 1;
+	return count;
+#else
 	return 1;
+#endif
 }
 
 /**
@@ -331,7 +364,7 @@ static inline void spin_lock(atomic_int *spin) {
  * @brief Unlock a spinlock
  * @param spin spinlock to unlock
  */
-static inline void spin_unlock(atomic_int *spin) {
+static inline void spin_unlock(atomic_int * spin) {
 	atomic_store_explicit(spin, SL_FREE, memory_order_release);
 }
 
@@ -447,7 +480,7 @@ static inline Bitboard file_rank_to_bit(const int f, const int r) {
  * @param x Square to set bit for
  * @return True if successful, false otherwise
  */
-static inline bool square_parse(char **string, Square *x) {
+static inline bool square_parse(const char ** string, Square *x) {
 	const char *s = *string;
 	if ('a' <= s[0] && s[0] <= 'h' && '1' <= s[1] && s[1] <= '8') {
 		*x = square(s[0] - 'a', s[1] - '1');
@@ -569,7 +602,7 @@ static inline int castling_from_char(const char c) {
  * @return Moving piece
  */
 static inline Piece move_piece(const Move move) {
-	return move & 7;
+	return move & 7U;
 }
 
 /**
@@ -578,7 +611,7 @@ static inline Piece move_piece(const Move move) {
  * @return Source square
  */
 static inline Square move_from(const Move move) {
-	return (move >> 3) & 63;
+	return (move >> 3U) & 63U;
 }
 
 /**
@@ -587,7 +620,7 @@ static inline Square move_from(const Move move) {
  * @return Destination square
  */
 static inline Square move_to(const Move move) {
-	return (move >> 9) & 63;
+	return (move >> 9U) & 63U;
 }
 
 /**
@@ -596,7 +629,7 @@ static inline Square move_to(const Move move) {
  * @return Promoted piece
  */
 static inline Piece move_promotion(const Move move) {
-	return move >> 15;
+	return move >> 15U;
 }
 
 /**
@@ -631,7 +664,7 @@ static inline char* move_to_string(const Move move, char *s) {
  */
 static int move_compare(const void *a, const void *b) {
 	char string_a[8], string_b[8];
-	return strcmp(move_to_string(*(Move*)a, string_a), move_to_string(*(Move*)b, string_b));
+	return strcmp(move_to_string(*(const Move*)a, string_a), move_to_string(*(const Move*)b, string_b));
 }
 
 /**
@@ -676,9 +709,9 @@ static void parse_error(const char *string, const char *done, const char *msg) {
  *  @param string String to skip spaces in
  *  @return Pointer to first non-space character
  */
-static char *parse_next(const char *string) {
-	while (isspace((int)*string)) ++string;
-	return (char*) string;
+static const char *parse_next(const char *string) {
+	while (isspace(*string)) ++string;
+	return (const char*) string;
 }
 
 /**
@@ -690,15 +723,13 @@ static char *parse_next(const char *string) {
  * NOTE: It is assumed that w is big enough to contains the word copy.
  * @return The remaining of the input string.
  */
-char* parse_word(const char *string, char *word, size_t n)
+static const char* parse_word(const char *string, char *word, size_t n)
 {
 	string = parse_next(string);
 	while(*string && !isspace(*string) && --n) *word++ = *string++;
 	*word = '\0';
-	return (char*) string;
+	return (const char*) string;
 }
-
-static inline Piece board_get_piece(const Board*, const Square);
 
 /**
  * @brief Parse a move.
@@ -706,25 +737,24 @@ static inline Piece board_get_piece(const Board*, const Square);
  * @param string String to parse
  * @return The remaining of the input string.
  */
-char *parse_move(char *string, const Board *board, Move *move) {
+static const char *parse_move(const char *string, const Board *board, Move *move) {
 	char word[8];
+	const char *w = word;
 	Square from, to;
 	Piece promotion;
 
 	string = parse_word(string, word, 8);
 	if (*word == '\0') return NULL;
 
-	from = square(word[0] - 'a', word[1] - '1');
-	to = square(word[2] - 'a', word[3] - '1');
-	promotion = word[4] ? piece_from_char(word[4]) : PAWN;
-
-    //
-/* 	if (!board->chess960 && cpiece_piece(board->cpiece[from]) == KING) {
-		if (to == from + 2) to = from + 3;
-		if (to == from - 2) to = from - 4;
+	if (square_parse(&w, &from) && square_parse(&w, &to)) {
+		promotion = piece_from_char(word[4]);
+		if (promotion == PIECE_SIZE) promotion = PAWN;
+	} else {
+		parse_error(word, "move", w);
+		return NULL;
 	}
-*/
-	*move = board_get_piece(board, from) | (from << 3) | (to << 9) | (promotion << 15);
+
+ 	*move = board_get_piece(board, from) | (from << 3) | (to << 9) | (promotion << 15);
 
 	return string;
 }
@@ -963,7 +993,7 @@ static Bitboard compute_slider_attack(const int x, const Bitboard pieces, const 
 
 	for (i = 0; i < 4; i++) {
 		for (r = rank(x) + d[i][0], f = file(x) + d[i][1]; 0 <= r && r < 8 && 0 <= f && f < 8; r += d[i][0], f += d[i][1]) {
-			b = 1ull << square(f, r);
+			b = 1ULL << square(f, r);
 			a |= b;
 			if ((pieces & b) != 0) break;
 		}
@@ -985,25 +1015,25 @@ static void init(const uint64_t seed) {
 	Random random[1];
 	CPiece p;
 	static const Bitboard rook_magic[BOARD_SIZE] = {
-		0x808000645080c000, 0x208020001480c000, 0x4180100160008048, 0x8180100018001680, 0x4200082010040201, 0x8300220400010008, 0x3100120000890004, 0x4080004500012180,
-		0x01548000a1804008, 0x4881004005208900, 0x0480802000801008, 0x02e8808010008800, 0x08cd804800240080, 0x8a058002008c0080, 0x0514000c480a1001, 0x0101000282004d00,
-		0x2048848000204000, 0x3020088020804000, 0x4806020020841240, 0x6080420008102202, 0x0010050011000800, 0xac00808004000200, 0x0000010100020004, 0x1500020004004581,
-		0x0004c00180052080, 0x0220028480254000, 0x2101200580100080, 0x0407201200084200, 0x0018004900100500, 0x100200020008e410, 0x0081020400100811, 0x0000012200024494,
-		0x8006c002808006a5, 0x0004201000404000, 0x0005402202001180, 0x0000081001002100, 0x0000100801000500, 0x4000020080800400, 0x4005050214001008, 0x810100118b000042,
-		0x0d01020040820020, 0x000140a010014000, 0x0420001500210040, 0x0054210010030009, 0x0004000408008080, 0x0002000400090100, 0x0000840200010100, 0x0000233442820004,
-		0x800a42002b008200, 0x0240200040009080, 0x0242001020408200, 0x4000801000480480, 0x2288008044000880, 0x000a800400020180, 0x0030011002880c00, 0x0041110880440200,
-		0x0002001100442082, 0x01a0104002208101, 0x080882014010200a, 0x0000100100600409, 0x0002011048204402, 0x0012000168041002, 0x080100008a000421, 0x0240022044031182
+		0x808000645080c000U, 0x208020001480c000U, 0x4180100160008048U, 0x8180100018001680U, 0x4200082010040201U, 0x8300220400010008U, 0x3100120000890004U, 0x4080004500012180U,
+		0x01548000a1804008U, 0x4881004005208900U, 0x0480802000801008U, 0x02e8808010008800U, 0x08cd804800240080U, 0x8a058002008c0080U, 0x0514000c480a1001U, 0x0101000282004d00U,
+		0x2048848000204000U, 0x3020088020804000U, 0x4806020020841240U, 0x6080420008102202U, 0x0010050011000800U, 0xac00808004000200U, 0x0000010100020004U, 0x1500020004004581U,
+		0x0004c00180052080U, 0x0220028480254000U, 0x2101200580100080U, 0x0407201200084200U, 0x0018004900100500U, 0x100200020008e410U, 0x0081020400100811U, 0x0000012200024494U,
+		0x8006c002808006a5U, 0x0004201000404000U, 0x0005402202001180U, 0x0000081001002100U, 0x0000100801000500U, 0x4000020080800400U, 0x4005050214001008U, 0x810100118b000042U,
+		0x0d01020040820020U, 0x000140a010014000U, 0x0420001500210040U, 0x0054210010030009U, 0x0004000408008080U, 0x0002000400090100U, 0x0000840200010100U, 0x0000233442820004U,
+		0x800a42002b008200U, 0x0240200040009080U, 0x0242001020408200U, 0x4000801000480480U, 0x2288008044000880U, 0x000a800400020180U, 0x0030011002880c00U, 0x0041110880440200U,
+		0x0002001100442082U, 0x01a0104002208101U, 0x080882014010200aU, 0x0000100100600409U, 0x0002011048204402U, 0x0012000168041002U, 0x080100008a000421U, 0x0240022044031182U
 	};
 
 	static const Bitboard bishop_magic[BOARD_SIZE] = {
-		0x88b030028800d040, 0x018242044c008010, 0x0010008200440000, 0x4311040888800a00, 0x001910400000410a, 0x2444240440000000, 0x0cd2080108090008, 0x2048242410041004,
-		0x8884441064080180, 0x00042131420a0240, 0x0028882800408400, 0x204384040b820200, 0x0402040420800020, 0x0000020910282304, 0x0096004b10082200, 0x4000a44218410802,
-		0x0808034002081241, 0x00101805210e1408, 0x9020400208010220, 0x000820050c010044, 0x0024005480a00000, 0x0000200200900890, 0x808040049c100808, 0x9020202200820802,
-		0x0410282124200400, 0x0090106008010110, 0x8001100501004201, 0x0104080004030c10, 0x0080840040802008, 0x2008008102406000, 0x2000888004040460, 0x00d0421242410410,
-		0x8410100401280800, 0x0801012000108428, 0x0000402080300b04, 0x0c20020080480080, 0x40100e0201502008, 0x4014208200448800, 0x4050020607084501, 0x1002820180020288,
-		0x800610040540a0c0, 0x0301009014081004, 0x2200610040502800, 0x0300442011002800, 0x0001022009002208, 0x0110011000202100, 0x1464082204080240, 0x0021310205800200,
-		0x0814020210040109, 0xc102008208c200a0, 0xc100702128080000, 0x0001044205040000, 0x0001041002020000, 0x4200040408021000, 0x004004040c494000, 0x2010108900408080,
-		0x0000820801040284, 0x0800004118111000, 0x0203040201108800, 0x2504040804208803, 0x0228000908030400, 0x0010402082020200, 0x00a0402208010100, 0x30c0214202044104
+		0x88b030028800d040U, 0x018242044c008010U, 0x0010008200440000U, 0x4311040888800a00U, 0x001910400000410aU, 0x2444240440000000U, 0x0cd2080108090008U, 0x2048242410041004U,
+		0x8884441064080180U, 0x00042131420a0240U, 0x0028882800408400U, 0x204384040b820200U, 0x0402040420800020U, 0x0000020910282304U, 0x0096004b10082200U, 0x4000a44218410802U,
+		0x0808034002081241U, 0x00101805210e1408U, 0x9020400208010220U, 0x000820050c010044U, 0x0024005480a00000U, 0x0000200200900890U, 0x808040049c100808U, 0x9020202200820802U,
+		0x0410282124200400U, 0x0090106008010110U, 0x8001100501004201U, 0x0104080004030c10U, 0x0080840040802008U, 0x2008008102406000U, 0x2000888004040460U, 0x00d0421242410410U,
+		0x8410100401280800U, 0x0801012000108428U, 0x0000402080300b04U, 0x0c20020080480080U, 0x40100e0201502008U, 0x4014208200448800U, 0x4050020607084501U, 0x1002820180020288U,
+		0x800610040540a0c0U, 0x0301009014081004U, 0x2200610040502800U, 0x0300442011002800U, 0x0001022009002208U, 0x0110011000202100U, 0x1464082204080240U, 0x0021310205800200U,
+		0x0814020210040109U, 0xc102008208c200a0U, 0xc100702128080000U, 0x0001044205040000U, 0x0001041002020000U, 0x4200040408021000U, 0x004004040c494000U, 0x2010108900408080U,
+		0x0000820801040284U, 0x0800004118111000U, 0x0203040201108800U, 0x2504040804208803U, 0x0228000908030400U, 0x0010402082020200U, 0x00a0402208010100U, 0x30c0214202044104U
 	};
     static const int pawn_dir[2][2] = {{-1, 1}, {1, 1}};
     static const int knight_dir[8][2] = {{-2, -1}, {-2, 1}, {-1, -2}, {-1, 2}, {1, -2}, {1, 2}, {2, -1}, {2, 1}};
@@ -1067,7 +1097,7 @@ static void init(const uint64_t seed) {
 		mask->bishop.mask = (mask->diagonal | mask->antidiagonal) & inside;
 		mask->bishop.shift = stdc_count_zeros_ull(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
-		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1ull << stdc_count_ones_ull(mask[-1].bishop.mask));
+		if (x) mask->bishop.attack = mask[-1].bishop.attack + (1ULL << stdc_count_ones_ull(mask[-1].bishop.mask));
 		o = 0; do {
 			mask->bishop.attack[magic_index(o, &mask->bishop)] = compute_slider_attack(x, o, bishop_dir);
 			o = (o - mask->bishop.mask) & mask->bishop.mask;
@@ -1077,7 +1107,7 @@ static void init(const uint64_t seed) {
 		mask->rook.mask = (mask->rank | mask->file) & inside;
 		mask->rook.shift = stdc_count_zeros_ull(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
-		if (x) mask->rook.attack = mask[-1].rook.attack + (1ull << stdc_count_ones_ull(mask[-1].rook.mask));
+		if (x) mask->rook.attack = mask[-1].rook.attack + (1ULL << stdc_count_ones_ull(mask[-1].rook.mask));
 		o = 0; do {
 			mask->rook.attack[magic_index(o, &mask->rook)] = compute_slider_attack(x, o, rook_dir);
 			o = (o - mask->rook.mask) & mask->rook.mask;
@@ -1099,7 +1129,7 @@ static void init(const uint64_t seed) {
 	for (c = 1; c < 16; ++c) key_init(KEY_CASTLING + c, random);
 
 	foreach_square (x) key_init(KEY_ENPASSANT + x, random);
-	key_init(KEY_ENPASSANT + BOARD_SIZE, random);
+	key_init(KEY_ENPASSANT + ENPASSANT_NONE, random);
 }
 
 /**
@@ -1146,7 +1176,7 @@ static void generate_checkers(Board *board) {
 	*pinned = 0;
 
 	// bishop or queen: all square reachable from the king square.
-	b = bishop_attack(pieces, k, -1ull);
+	b = bishop_attack(pieces, k, -1ULL);
 
 	//checkers
 	*checkers = partial_checkers = b & bq;
@@ -1162,7 +1192,7 @@ static void generate_checkers(Board *board) {
 	}
 
 	// rook or queen: all square reachable from the king square.
-	b = rook_attack(pieces, k, -1ull);
+	b = rook_attack(pieces, k, -1ULL);
 
 	// checkers = opponent rook or queen
 	*checkers |= partial_checkers = b & rq;
@@ -1199,14 +1229,14 @@ static inline void board_clear(Board *board) {
  */
 static void board_init(Board *board) {
 	board_clear(board);
-	board->piece[PAWN] =   0x00ff00000000ff00ull;
-	board->piece[KNIGHT] = 0x4200000000000042ull;
-	board->piece[BISHOP] = 0x2400000000000024ull;
-	board->piece[ROOK] =   0x8100000000000081ull;
-	board->piece[QUEEN] =  0x0800000000000008ull;
-	board->piece[KING] =   0x1000000000000010ull;
-	board->color[WHITE] =  0x000000000000ffffull;
-	board->color[BLACK] =  0xffff000000000000ull;
+	board->piece[PAWN] =   0x00FF00000000FF00ULL;
+	board->piece[KNIGHT] = 0x4200000000000042ULL;
+	board->piece[BISHOP] = 0x2400000000000024ULL;
+	board->piece[ROOK] =   0x8100000000000081ULL;
+	board->piece[QUEEN] =  0x0800000000000008ULL;
+	board->piece[KING] =   0x1000000000000010ULL;
+	board->color[WHITE] =  0x000000000000FFFFULL;
+	board->color[BLACK] =  0xFFFF000000000000ULL;
 	board->pinned = board->checkers = 0;
 	board->castling = 15;
 	board->enpassant = ENPASSANT_NONE; // illegal enpassant square
@@ -1223,14 +1253,15 @@ static void board_init(Board *board) {
  * @param board Board to parse FEN string into
  * @param string FEN string to parse
  */
-static void board_set(Board *board, char *string) {
-	char *s = string;
+static void board_set(Board *board, const char *string) {
+	const char *s = string;
 	Square x;
 	int r, f;
 	CPiece p;
 
 	if (!s || *s == '\0') return;
 	board_clear(board);
+
 	// board
 	r = 7, f = 0;
 	do {
@@ -1254,11 +1285,13 @@ static void board_set(Board *board, char *string) {
 		++s;
 	} while (*s && *s != ' ');
 	if (r < 0 || f != 8) parse_error(string, s, "FEN: missing square");
+
 	// turn
 	if (*s++ != ' ') parse_error(string, s, "FEN: missing space before player's turn");
 	board->player = (uint8_t) color_from_char(*s);
 	if (board->player == COLOR_SIZE) parse_error(string, s, "FEN: bad player's turn");
 	++s;
+
 	// castling
 	s = parse_next(s);
 	if (*s == '-') s++;
@@ -1279,11 +1312,11 @@ static void board_set(Board *board, char *string) {
 		if ((rooks & square_to_bit(H8)) == 0) board->castling &= ~1;
 		if ((rooks & square_to_bit(A8)) == 0) board->castling &= ~2;
 	} else board->castling &= ~12;
+
 	// en passant
 	x = ENPASSANT_NONE;
 	s = parse_next(s);
-	if (*s == '-') s++;
-	else if (!square_parse(&s, &x)) parse_error(string, s, "FEN: bad enpassant square");
+	if (*s != '-' && !square_parse(&s, &x)) parse_error(string, s, "FEN: bad enpassant square");
 	board->enpassant = x;
 	// update other chess board structure
 	key_set(&board->key, board);
@@ -1548,11 +1581,11 @@ static int count_moves(const Board *board, const bool do_quiet) {
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			if (d == abs(pawn_left) && (square_to_bit(to = from + pawn_left) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
-			else if (d == abs(pawn_right) && (square_to_bit(to = from + pawn_right) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
+			if (d == abs(pawn_left) && (square_to_bit(from + pawn_left) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
+			else if (d == abs(pawn_right) && (square_to_bit(from + pawn_right) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
 			if (do_quiet && d == abs(pawn_push) && (square_to_bit(to = from + pawn_push) & empty)) {
 				++count;
-				if (is_on_second_rank(from, c) && (square_to_bit(to += pawn_push) & empty)) ++count;
+				if (is_on_second_rank(from, c) && (square_to_bit(to + pawn_push) & empty)) ++count;
 			}
 		}
 		// bishop or queen (pinned)
@@ -1923,8 +1956,17 @@ static void hash_destroy(HashTable *hash_table) {
  * @param hash_table Hash table
  */
 static inline void hash_clear(HashTable *hash_table) {
+	size_t i;
 	memset(hash_table->hash, 0, (hash_table->mask + BUCKET_SIZE + 1) * sizeof(Hash));
-	memset(hash_table->spin, 0, (hash_table->mask + BUCKET_SIZE + 1) * sizeof(atomic_int));
+	for (i = 0; i <= hash_table->mask + BUCKET_SIZE - 3; i += 4) {
+		spin_init(hash_table->spin + i);
+		spin_init(hash_table->spin + i + 1);
+		spin_init(hash_table->spin + i + 2);
+		spin_init(hash_table->spin + i + 3);
+	}
+	for (; i <= hash_table->mask + BUCKET_SIZE; ++i) {
+		spin_init(hash_table->spin + i);
+	}
 }
 
 /**
@@ -1987,8 +2029,7 @@ static void hash_store(const HashTable *hash_table, const Key *key, const uint32
  * @brief Prefetch a hash table entry (for faster access).
  * @param hashtable Hash table
  * @param key Key
- */
-static inline void hash_prefetch(const HashTable *hashtable, const Key *key) {
+ */static inline void hash_prefetch(const HashTable *hashtable, const Key *key) {
 #if defined(__x86_64__)
 	_mm_prefetch((const char*) (hashtable->hash + (key->index & hashtable->mask)), _MM_HINT_T2);
 	_mm_prefetch((const char*) (hashtable->spin + (key->index & hashtable->mask)), _MM_HINT_T2);
@@ -2013,7 +2054,6 @@ static void taskpool_put_idle_task(TaskPool *task_pool, Task *task) {
  * @brief Run a perft search in parallel.
  * @param task Task
  */
-static uint64_t perft(const Board *, HashTable*, TaskPool *, const uint32_t, const Option*);
 static void task_run(Task *task) {
 	uint64_t count;
 	Node *node = task->node;
@@ -2180,7 +2220,6 @@ static bool node_split(Node *node, const Board *board, TaskPool *task_pool, cons
 		task->board = *board;
 		task->node = node;
 		task->depth = depth;
-		// if (depth > 6) printf("Splitting node using task %d at depth %d\n", task->id, depth);
 		cnd_signal(&task->condition);
 	mtx_unlock(&task->mutex);
 
@@ -2235,7 +2274,7 @@ static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_p
 					if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
 						hash_count += perft(&next, hashtable, task_pool, depth - 1, option);
 						hash_store(hashtable, &key, depth - 1, hash_count);
-					};
+					}
 				}
 				count += hash_count;
 			} else if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
@@ -2258,7 +2297,7 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 		uint64_t result;
 		uint32_t depth;
 	} TestBoard;
-	TestBoard tests[] = {
+	const TestBoard tests[] = {
 		{"1. Initial position ", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 119060324, 6},
 		{"2.", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -", 193690690, 5},
 		{"3.", "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - -", 178633661, 7},
@@ -2283,7 +2322,7 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 	};
 
 	printf("Testing the board generator\n");
-	for (TestBoard *t = tests; t->fen != NULL; ++t) {
+	for (const TestBoard *t = tests; t->fen != NULL; ++t) {
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
 		board_set(&board, t->fen);
 		uint64_t count = perft(&board, hashtable, task_pool, t->depth, &option);
@@ -2301,7 +2340,7 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
  * @return 0
  */
 int main(int argc, char **argv) {
-	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
+	double full_time= -chrono(), partial_time, total_time = 0.0;
 	Board board, next;
 	HashTable *hashtable = NULL;
 	TaskPool task_pool = {.n_tasks = 0, .n_idle = 0};
@@ -2309,7 +2348,7 @@ int main(int argc, char **argv) {
 	MoveArray ma;
 	uint64_t count, total = 0;
 	uint64_t seed = 0xA170EBA;
-	char *fen = NULL, *moves = NULL;
+	const char *fen = NULL, *moves = NULL;
 	uint32_t depth = 6, hash_size = 0, n_threads = 1, n_repetition = 1;
 	Move move;
 	bool div = false, loop = false, verbose = true, do_test = false;
@@ -2391,11 +2430,8 @@ int main(int argc, char **argv) {
 
 	if (verbose) {
 		puts("Magic Perft version 4.0 (c) Richard Delorme 2020 - 2026");
-		#if HAS_PEXT
-			puts("Bitboard move generation based on magic (pext) bitboards");
-		#else
-			puts("Bitboard move generation based on magic bitboards");
-		#endif
+		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards");
+		else puts("Bitboard move generation based on magic bitboards");
 		printf("Perft setting: ");
 		if (hash_size == 0) printf("no hashing; ");
 		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), hashtable->mask + BUCKET_SIZE + 1);
@@ -2441,7 +2477,6 @@ int main(int argc, char **argv) {
 		}
 	}
 	if (div || loop || n_repetition > 1) printf("total    : %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", total, total_time, total / total_time);
-
 
 	hash_destroy(hashtable);
 	taskpool_free(&task_pool);
