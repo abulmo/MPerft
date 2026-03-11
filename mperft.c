@@ -23,6 +23,7 @@
 
 #if defined(_WIN32)
 	#include <intrin.h>
+	#include <windows.h>
 #elif defined(__x86_64__)
 	#include <x86intrin.h>
 #endif
