@@ -5,7 +5,6 @@ Fast bitboard chess move generation based on magic bitboards, optional bulking c
 mperft <args> 
 Enumerate moves. The following options are available:
 	--bulk|-b               Do fast bulk counting at the last ply.
-	--capture|-c            Generate only captures, promotions & check evasions.
 	[--depth|-d] <depth>    Test up to this depth (default = 6).
 	--div                   Print a node count for each move.
 	--fast                  Automatically set highest settings.
@@ -36,13 +35,13 @@ Executable are given for Linux & Windows for intel64/amd64 cpu in 3 flavours:
  - x86-64-v3 support AVX2 extension, including the PEX instruction.
 
 ## Compilation
-You can compile mperft for your own CPU using the makefile or the .bat file provided for clang & icx (intel C compiler). For example under Linux, using the intel C compiler:
+You can compile mperft for your own CPU using the makefile or the .bat file provided for clang & icx (intel C compiler). For example under Linux, using the clang compiler:
 ```
-CC=icx make
+CC=clang make
 ```
 or under MS-Windows:
 ```
-build-icx.bat native
+build-clang.bat native
 ```
 
 ## Example
@@ -86,4 +85,4 @@ full time:  17860.911 s
 - Version 3.0 Add support for multithreading.
 - Version 3.1 Remove some OS/platform dependencies. Alphabetically sort the move with the --div command.
 - Version 3.2 Remove more OS/platform dependencies. Fix a bug (free() incompatibility with _aligned_malloc()). Faster executable for Windows.
-- Version 4.0 Code fix & optimisation
+- Version 4.0 Code fix & optimisation. Add --fast & --moves option. remove --capture option.
