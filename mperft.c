@@ -5,16 +5,14 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 4.0
+ * @version 4.1
  */
 
 /* includes */
 #include <assert.h>
 #include <ctype.h>
 #include <inttypes.h>
-#include <stdalign.h>
 #include <stdatomic.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,11 +22,12 @@
 #if defined(_WIN32)
 	#include <intrin.h>
 	#include <windows.h>
-#elif defined(__x86_64__)
-	#include <x86intrin.h>
 #endif
 
 #if defined(__linux__)
+	#if defined(__x86_64__)
+		#include <x86intrin.h>
+	#endif
 	#include <unistd.h>
 	#include <sys/sysinfo.h>
 #endif
@@ -77,6 +76,16 @@ typedef uint64_t Bitboard;
 /** Random: 64-bit unsigned integer representing a random number */
 typedef uint64_t Random;
 
+/** Counter: a 128 bit unsigned integer */
+#if defined(__SIZEOF_INT128__) && defined(USE_INT128)
+	typedef __int128 int128_t;
+	typedef unsigned __int128 uint128_t;
+	typedef uint128_t Counter;
+#else
+	#undef USE_INT128
+	typedef uint64_t Counter;
+#endif
+
 /** Color: Enum representing the color of a piece */
 typedef enum : int { WHITE, BLACK, COLOR_SIZE } Color;
 
@@ -110,8 +119,12 @@ typedef uint32_t Move;
 
 /** Key: Struct representing a key for a hash table */
 typedef struct {
+#ifdef USE_INT128
+	uint128_t code; ///< Hash code for the key
+#else
 	uint64_t code; ///< Hash code for the key
-	uint32_t index; ///< Index for the key
+#endif
+	uint64_t index; ///< Index for the key
 } Key;
 
 /** Attack: Struct to compute the target squares of a sliding piece on the board */
@@ -161,8 +174,13 @@ typedef struct {
 
 /** Hash: Struct to represent an entry in the transposition table */
 typedef struct {
+#ifdef USE_INT128
+	uint128_t code; ///< Hash code
+	uint128_t data; ///< Hash data : count (122 bits) | depth (6 bits)
+#else
 	uint64_t code; ///< Hash code
-	uint64_t data; ///< Hash data : count (58 bits) | depth (6 bits)
+	uint64_t data; ///< Hash data : count (56 bits) | depth (6 bits)
+#endif
 } Hash;
 
 /** HashTable: Struct to represent a hash table */
@@ -172,22 +190,10 @@ typedef struct {
 	uint64_t mask; ///< Hash table mask
 } HashTable;
 
-
-/** Node: Struct to represent a node where the perft is splitted among several tasks in the search tree */
-typedef struct {
-	uint64_t count; ///< Count of moves at this node
-	int task_id[MAX_SPLIT]; ///< List of tasks used at this node
-	atomic_int spin; ///< Spin lock for the node
-	int n_split; ///< Number of tasks used at this node
-} Node;
-
 /** Task: Struct to represent a task in the search tree */
-typedef struct {
+typedef struct Task {
 	Board board; ///< Board state at this task
-	Node *node; ///< Pointer to the node associated with this task
-	HashTable *hash_table; ///< Pointer to the shared hash table
-	bool bulk; ///< optional bulk counting
-	struct TaskPool *task_pool; ///< Pointer to the task pool
+	struct Node *node; ///< Pointer to the node associated with this task
 	int depth; ///< Perft depth
 	int id; ///< Task ID
 
@@ -197,6 +203,13 @@ typedef struct {
 	bool loop; ///< Loop flag for the task
 	bool run; ///< Run flag for the task
 } Task;
+
+/** Node: Struct to represent a node where the perft is splitted among several tasks in the search tree */
+typedef struct Node {
+	Counter count; ///< Count of moves at this node
+	atomic_int spin; ///< Spin lock for the node
+	int n_split; ///< Number of tasks used at this node
+} Node;
 
 /** TaskPool: Struct to represent a task pool, ie a set of tasks */
 typedef struct TaskPool {
@@ -254,24 +267,47 @@ static const int BUCKET_SIZE = 4;
 /** SPINLOCK STATE Enum representing the state of a spin lock */
 enum {SL_FREE = 0, SL_BUSY = 1};
 
-/* Globals */
+/* Globals: shared value & struicture all over the code */
 static Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
 static Key KEY_PLAYER[COLOR_SIZE]; ///< Key for each player
 static Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE]; ///< Key for each square and piece
 static Key KEY_CASTLING[16]; ///< Key for each castling state
 static Key KEY_ENPASSANT[BOARD_SIZE + 1]; ///< Key for each en passant state
 static Key KEY_PLAY; ///< Key to switch players
+static HashTable *hash_table = NULL;
+static TaskPool *task_pool = NULL;
+static bool bulk = false;
 
 /* function declaration */
 static inline Piece board_get_piece(const Board*, const Square);
-static uint64_t perft(const Board*, HashTable*, TaskPool*, const uint32_t, const bool);
+static Counter perft(const Board*, const uint32_t);
+
 
 /**
- * @brief Get a random number
+ * @brief Counter to a string
+ * Limitations: Assume that the counter is less than 10^36
+ * and this function not thread safe.
+ *
+ * @param count Counter to convert
+ * @param buf Buffer to store the result
+ * @return Pointer to the buffer
+ */
+static char *counter_to_str(Counter count) {
+	static char buf[64];
+
+	unsigned long long a = count / 1000000000000000000ULL;
+	unsigned long long b = count % 1000000000000000000ULL;
+	if (a > 0) sprintf(buf, "%llu%018llu", a, b);
+	else sprintf(buf, "%llu", b);
+	return buf;
+}
+
+/**
+ * @brief Get a 64 bit random number
  * @param random Random number generator
  * @return Random number
  */
-static uint64_t random_get(Random *random) {
+static uint64_t random_get_u64(Random *random) {
 	const uint64_t A = 0x5DEECE66DULL;
 	const uint64_t B = 0xBULL;
 	uint64_t r;
@@ -281,6 +317,18 @@ static uint64_t random_get(Random *random) {
 	*random = ((A * *random + B) & MASK48);
 	return (r << 32) | (*random >> 16);
 }
+
+/**
+ * @brief Get a 128 bit random number
+ * @param random Random number generator
+ * @return Random number
+ */
+#ifdef USE_INT128
+static uint128_t random_get_u128(Random *random) {
+	uint128_t r = random_get_u64(random);
+	return (r << 64) | random_get_u64(random);
+}
+#endif
 
 /**
  * @brief Init the random generator
@@ -358,7 +406,7 @@ static inline void spin_lock(atomic_int *spin) {
  * @brief Unlock a spinlock
  * @param spin spinlock to unlock
  */
-static inline void spin_unlock(atomic_int * spin) {
+static inline void spin_unlock(atomic_int *spin) {
 	atomic_store_explicit(spin, SL_FREE, memory_order_release);
 }
 
@@ -884,8 +932,12 @@ static inline CPiece board_get_cpiece(const Board *board, const Square x) {
  * @param r Random number generator
  */
 static inline void key_init(Key *key, Random *r) {
-	key->code = random_get(r);
-	key->index = (uint32_t) random_get(r);
+	#ifdef USE_INT128
+		key->code = random_get_u128(r);
+	#else
+		key->code = random_get_u64(r);
+	#endif
+	key->index = random_get_u64(r);
 }
 
 /**
@@ -1578,10 +1630,8 @@ static int count_moves(const Board *board) {
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			attack = 0;
-			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
-			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			count += stdc_count_ones_ull(attack);
+			if (d == 9) count += stdc_count_ones_ull(bishop_attack(occupied, from, target & MASK[from].diagonal));
+			else if (d == 7) count += stdc_count_ones_ull(bishop_attack(occupied, from, target & MASK[from].antidiagonal));
 		}
 		// rook or queen (pinned)
 		piece = rq & pinned;
@@ -1589,9 +1639,8 @@ static int count_moves(const Board *board) {
 			from = square_next(&piece);
 			d = dir[from];
 			attack = 0;
-			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
-			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			count += stdc_count_ones_ull(attack);
+			if (d == 1) count += stdc_count_ones_ull(rook_attack(occupied, from, target & MASK[from].rank));
+			else if (d == 8) count += stdc_count_ones_ull(rook_attack(occupied, from, target & MASK[from].file));
 		}
 	}
 
@@ -1600,15 +1649,15 @@ static int count_moves(const Board *board) {
 		to = board->enpassant;
 		ep = to - pawn_push;
 		from = ep - 1;
-		attack = square_to_bit(from);
-		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & attack)) {
-			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
+		piece = square_to_bit(from);
+		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & piece)) {
+			piece ^= occupied ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
 		}
 		from = ep + 1;
-		attack = square_to_bit(from);
-		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & attack)) {
-			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
+		piece = square_to_bit(from);
+		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & piece)) {
+			piece ^= occupied ^ square_to_bit(ep) ^ square_to_bit(to);
 			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
 		}
 	}
@@ -1661,7 +1710,6 @@ static int count_moves(const Board *board) {
 
 	return count;
 }
-
 
 /**
  * @brief Generate all legal moves
@@ -1741,32 +1789,26 @@ static int generate_moves(const Board *board, Move *move) {
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			attack = 0;
-			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
-			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			move = push_moves(move, attack, BISHOP, from);
+			if (d == 9) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].diagonal), BISHOP, from);
+			else if (d == 7) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].antidiagonal), BISHOP, from);
 		}
 		// rook (pinned)
 		piece = board->piece[ROOK] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			attack = 0;
-			if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
-			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			move = push_moves(move, attack, ROOK, from);
+			if (d == 1) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].rank), ROOK, from);
+			else if (d == 8) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].file), ROOK, from);
 		}
 		// queen (pinned)
 		piece = board->piece[QUEEN] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			attack = 0;
-			if (d == 9) attack = bishop_attack(occupied, from, target & MASK[from].diagonal);
-			else if (d == 7) attack = bishop_attack(occupied, from, target & MASK[from].antidiagonal);
-			else if (d == 1) attack = rook_attack(occupied, from, target & MASK[from].rank);
-			else if (d == 8) attack = rook_attack(occupied, from, target & MASK[from].file);
-			move = push_moves(move, attack, QUEEN, from);
+			if (d == 9) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].diagonal), QUEEN, from);
+			else if (d == 7) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].antidiagonal), QUEEN, from);
+			else if (d == 1) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].rank), QUEEN, from);
+			else if (d == 8) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].file), QUEEN, from);
 		}
 	}
 
@@ -2024,45 +2066,6 @@ static void taskpool_put_idle_task(TaskPool *task_pool, Task *task) {
 }
 
 /**
- * @brief Run a perft search in parallel.
- * @param task Task
- */
-static void task_run(Task *task) {
-	uint64_t count;
-	Node *node = task->node;
-	HashTable *hash_table = task->hash_table;
-	TaskPool *task_pool = task->task_pool;
-	const Board *board = &task->board;
-	const Key *key = &board->key;
-	const uint32_t depth  = task->depth;
-	const bool bulk = task->bulk;
-
-	// do perft
-	if (hash_table) {
-		count = hash_probe(hash_table, key, depth);
-		if (count == 0) {
-			count = perft(board, hash_table, task_pool, depth, bulk);
-			hash_store(hash_table, key, depth, count);
-		}
-	} else count = perft(board, hash_table, task_pool, depth, bulk);
-
-	// store the result & release the thread
-	spin_lock(&node->spin);
-		node->count += count;
-		for (int i = 0; i < node->n_split; i++) {
-			if (node->task_id[i] == task->id) {
-				node->task_id[i] = node->task_id[--node->n_split];
-				break;
-			}
-		}
-	spin_unlock(&node->spin);
-
-	task->run = false;
-	taskpool_put_idle_task(task->task_pool, task);
-
-}
-
-/**
  * Free resources used by a task.
  * @param task Task
  */
@@ -2072,6 +2075,32 @@ static void task_free(Task *task) {
 	thrd_join(task->thread, NULL);
 	mtx_destroy(&task->mutex);
 	cnd_destroy(&task->condition);
+}
+
+/**
+ * @brief Run a perft search in parallel.
+ * @param task Task
+ */
+static void task_run(Task *task) {
+	uint64_t count;
+	Node *node = task->node;
+	const Board *board = &task->board;
+	const Key *key = &board->key;
+	const uint32_t depth  = task->depth;
+
+	// do perft
+	count = perft(board, depth);
+	if (hash_table) hash_store(hash_table, key, depth, count);
+
+	// store the result & release the thread
+	spin_lock(&node->spin);
+		node->count += count;
+		node->n_split--;
+	spin_unlock(&node->spin);
+
+	// put the task back to the pool
+	task->run = false;
+	taskpool_put_idle_task(task_pool, task);
 }
 
 /**
@@ -2104,14 +2133,11 @@ static int task_loop(void *param)
  * @param id Task ID
  * @param bulk do bulk counting
  */
-static void task_init(Task *task, HashTable *hash_table, TaskPool *task_pool, const int id, const bool bulk) {
+static void task_init(Task *task, const int id) {
 	task->run = false;
 	task->loop = false;
 	task->id = id;
 	task->depth = 0;
-	task->hash_table = hash_table;
-	task->task_pool = task_pool;
-	task->bulk = bulk;
 	mtx_init(&task->mutex, mtx_plain);
 	cnd_init(&task->condition);
 	thrd_create(&task->thread, task_loop, task);
@@ -2124,29 +2150,37 @@ static void task_init(Task *task, HashTable *hash_table, TaskPool *task_pool, co
  * @param hash_table Hash table
  * @param bulk do bulk counting
  */
-static void taskpool_init(TaskPool *task_pool, const int n_workers, HashTable *hash_table, const bool bulk) {
+static TaskPool* taskpool_create(const int n_workers) {
+	static const struct timespec ONE_MS = {.tv_sec = 0, .tv_nsec = 1000};
+	task_pool = malloc(sizeof(TaskPool));
+	if (task_pool == NULL) memory_error(__func__);
 	task_pool->n_tasks = task_pool->n_idle = n_workers;
 	task_pool->tasks = n_workers ? malloc(n_workers * sizeof (Task)) : NULL;
 	task_pool->idle_tasks = n_workers ? malloc(n_workers * sizeof (Task*)) : NULL;
 	spin_init(&task_pool->spin);
 	for (int i = 0 ; i < n_workers; ++i) {
-		task_init(task_pool->tasks + i, hash_table, task_pool, i, bulk);
-		task_pool->idle_tasks[i] = task_pool->tasks + i;
+		Task *task = task_pool->tasks + i;
+		task_init(task, i);
+		task_pool->idle_tasks[n_workers - i - 1] = task;
 	}
-	// wait for all tasks to be initialized...
-	thrd_sleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 10000}, NULL);
+	// hack: wait for all tasks to be initialized...
+	if (n_workers) {
+		while (task_pool->idle_tasks[0]->loop == false) thrd_sleep(&ONE_MS, NULL);
+	}
+	return task_pool;
 }
 
 /**
  * @breif Free ressources of a pool of tasks
  * @param task_pool Task pool
  */
-static void taskpool_free(TaskPool *task_pool) {
+static void taskpool_destroy(TaskPool *task_pool) {
 	for (int i = 0 ; i < task_pool->n_tasks; ++i) {
 		task_free(task_pool->tasks + i);
 	}
 	free(task_pool->tasks);
 	free(task_pool->idle_tasks);
+	free(task_pool);
 }
 
 /**
@@ -2154,9 +2188,9 @@ static void taskpool_free(TaskPool *task_pool) {
  * @param node Node to initialize
  */
 static inline void node_init(Node *node) {
-	spin_init(&node->spin);
-	node->n_split = 0;
 	node->count = 0;
+	node->n_split = 0;
+	spin_init(&node->spin);
 }
 
 /**
@@ -2168,25 +2202,25 @@ static inline void node_init(Node *node) {
  * @param moves_todo Number of moves remaining
  * @return True if the search was split, false otherwise
  */
-static bool node_split(Node *node, const Board *board, TaskPool *task_pool, const int depth, const int moves_todo) {
+static bool node_split(Node *node, const Board *board, const int depth, const int moves_todo) {
 	if (depth < MIN_SPLIT_DEPTH || moves_todo < MIN_SPLIT_REMAINING_MOVES) return false;
+	Task *task = NULL;
 
-	spin_lock(&task_pool->spin);
-		if (task_pool->n_idle == 0) {
-			spin_unlock(&task_pool->spin);
-			return false;
-		}
-
-		spin_lock(&node->spin);
-			if (node->n_split >= MAX_SPLIT) {
+	// look for an available task in the task_pool
+	if (task_pool->n_idle > 0) {
+		spin_lock(&task_pool->spin);
+			if (task_pool->n_idle > 0) {
+				spin_lock(&node->spin);
+					if (node->n_split < MAX_SPLIT) {
+						task = task_pool->idle_tasks[--task_pool->n_idle];
+						node->n_split++;
+					}
 				spin_unlock(&node->spin);
-				spin_unlock(&task_pool->spin);
-				return false;
 			}
-			Task *task = task_pool->idle_tasks[--task_pool->n_idle];
-			node->task_id[node->n_split++] = task->id;
-		spin_unlock(&node->spin);
-	spin_unlock(&task_pool->spin);
+		spin_unlock(&task_pool->spin);
+	}
+
+	if (task == NULL) return false;
 
 	mtx_lock(&task->mutex);
 		task->run = true;
@@ -2211,23 +2245,42 @@ static inline uint64_t node_wait(const Node *node) {
 }
 
 /**
- * @brief Recursive Perft with optional hashtable, pool of tasks, bulk counting & capture only generation.
+ * @brief Perft at depth 2.
  * @param board Board to analyze
- * @param hashtable Hash table to use
- * @param task_pool Task pool to use
- * @param depth Depth to analyze
- * @param bulk do bulk counting
  * @return Total count of nodes
  */
-static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_pool, const uint32_t depth, const bool bulk) {
-	const bool use_hash = (hashtable && depth >= MIN_HASH_DEPTH);
+static int perft_2(const Board *board) {
+	Board next;
+	int count = 0;
+	Move move;
+	MoveArray ma;
+
+	movearray_generate(&ma, board);
+	while ((move = movearray_next(&ma)) != 0) {
+		board_copymake(board, move, &next);
+		count += count_moves(&next);
+	}
+	return count;
+}
+
+
+/**
+ * @brief Recursive Perft with optional hashtable, pool of tasks, bulk counting & capture only generation.
+ * @param board Board to analyze
+ * @param depth Depth to analyze
+ * @return Total count of nodes
+ */
+static Counter perft(const Board *board, const uint32_t depth) {
+	const bool use_hash = (hash_table && depth >= MIN_HASH_DEPTH);
 	const bool use_bulk_counting = (bulk && depth == 2);
 	Board next;
-	uint64_t count = 0, hash_count;
+	Counter count = 0, hash_count;
 	Move move;
 	MoveArray ma;
 	Node node;
 	Key key;
+
+	if (use_bulk_counting) return perft_2(board);
 
 	movearray_generate(&ma, board);
 	node_init(&node);
@@ -2235,24 +2288,23 @@ static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_p
 	while ((move = movearray_next(&ma)) != 0) {
 		if (use_hash) {
 			key_update(&key, board, move);
-			hash_prefetch(hashtable, &key);
+			hash_prefetch(hash_table, &key);
 		}
 		board_copymake(board, move, &next);
 		if (depth == 1) ++count;
-		else if (use_bulk_counting) count += count_moves(&next);
 		else {
 			if (use_hash) {
-				hash_count = hash_probe(hashtable, &key, depth - 1);
+				hash_count = hash_probe(hash_table, &key, depth - 1);
 				if (hash_count == 0) {
 					next.key = key;
-					if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
-						hash_count += perft(&next, hashtable, task_pool, depth - 1, bulk);
-						hash_store(hashtable, &key, depth - 1, hash_count);
+					if (!node_split(&node, &next, depth - 1, movearray_todo(&ma))) {
+						hash_count = perft(&next, depth - 1);
+						hash_store(hash_table, &key, depth - 1, hash_count);
 					}
 				}
 				count += hash_count;
-			} else if (!node_split(&node, &next, task_pool, depth - 1, movearray_todo(&ma))) {
-				count += perft(&next, hashtable, task_pool, depth - 1, bulk);
+			} else if (!node_split(&node, &next, depth - 1, movearray_todo(&ma))) {
+				count += perft(&next, depth - 1);
 			}
 		}
 	}
@@ -2261,13 +2313,12 @@ static uint64_t perft(const Board *board, HashTable *hashtable, TaskPool *task_p
 	return count;
 }
 
-
 /** Test */
-static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
+static void test() {
 	Board board;
 	typedef struct TestBoard {
 		char *comments, *fen;
-		uint64_t result;
+		Counter result;
 		uint32_t depth;
 	} TestBoard;
 	const TestBoard tests[] = {
@@ -2298,8 +2349,9 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
 	for (const TestBoard *t = tests; t->fen != NULL; ++t) {
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
 		board_set(&board, t->fen);
-		uint64_t count = perft(&board, hashtable, task_pool, t->depth, bulk);
-		if (count == t->result) printf(" passed\n"); else printf(" FAILED ! %" PRIu64 " != %" PRIu64 "\n", count, t->result);
+		Counter count = perft(&board, t->depth);
+		if (count == t->result) printf(" passed\n");
+		else printf(" FAILED ! %s != %s\n", counter_to_str(count), counter_to_str(t->result));
 	}
 }
 
@@ -2313,17 +2365,18 @@ static void test(HashTable *hashtable,TaskPool *task_pool, const bool bulk) {
  * @return 0
  */
 int main(int argc, char **argv) {
+	const size_t MAX_HASH_SIZE = get_available_memory();
+	const uint32_t N_PROCESSORS = get_available_processors();
 	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
 	Board board, next;
-	HashTable *hashtable = NULL;
-	TaskPool task_pool = {.n_tasks = 0, .n_idle = 0};
 	MoveArray ma;
-	uint64_t count, total = 0;
+	Counter count, total = 0;
 	uint64_t seed = 0xA170EBA;
 	const char *fen = NULL, *moves = NULL;
-	uint32_t depth = 6, hash_size = 0, n_threads = 1, n_repetition = 1;
+	uint32_t depth = 6, n_threads = 1, n_repetition = 1;
+	size_t hash_size = 0;
+	bool div = false, loop = false, verbose = true, do_test = false;
 	Move move;
-	bool div = false, loop = false, verbose = true, do_test = false, bulk = false;
 
 	// argument
 	for (int i = 1; i < argc; ++i) {
@@ -2333,8 +2386,8 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--div")) div = true;
 		else if (!strcmp(argv[i], "--fast")) {
 			bulk = true;
-			hash_size = get_available_memory();
-			n_threads = get_available_processors();
+			hash_size = MAX_HASH_SIZE;
+			n_threads = N_PROCESSORS;
 		} else if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
 		else if (i < argc - 1 && (!strcmp(argv[i], "--hash") || !strcmp(argv[i], "-h"))) hash_size = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--kiwipete") || !strcmp(argv[i], "-k")) fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
@@ -2369,16 +2422,17 @@ int main(int argc, char **argv) {
 
 	// hash table initialization
 	init(seed);
-	if (hash_size > 65536) hash_size = 65536; // max size of 64G for a 32 bit index
-	hashtable = hash_create(hash_size);
+	if (hash_size > MAX_HASH_SIZE) hash_size = MAX_HASH_SIZE; // max size set to available memory
+	hash_table = hash_create(hash_size);
 
 	// thread initialization
 	if (n_threads < 1) n_threads = 1;
-	if (n_threads > 256) n_threads = 256;
-	taskpool_init(&task_pool, n_threads - 1, hashtable, bulk);
+	if (n_threads > N_PROCESSORS) n_threads = N_PROCESSORS;
+	task_pool = taskpool_create(n_threads - 1);
 
+	// Test
 	if (do_test) {
-		test(hashtable, &task_pool, bulk);
+		test();
 		return 0;
 	}
 
@@ -2393,17 +2447,19 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	// depth and repetition bounds
 	if (depth < 1) depth = 1;
 	if (depth > 63) depth = 63;
 	if (n_repetition < 1) n_repetition = 1;
 
+	// Header output
 	if (verbose) {
-		puts("Magic Perft version 4.0 (c) Richard Delorme 2020 - 2026");
+		puts("Magic Perft version 4.1 (c) Richard Delorme 2020 - 2026");
 		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards");
 		else puts("Bitboard move generation based on magic bitboards");
 		printf("Perft setting: ");
 		if (hash_size == 0) printf("no hashing; ");
-		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ", (unsigned) (sizeof (Hash) * (hashtable->mask + BUCKET_SIZE + 1) >> 20), hashtable->mask + BUCKET_SIZE + 1);
+		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ", (unsigned) (sizeof (Hash) * (hash_table->mask + BUCKET_SIZE + 1) >> 20), hash_table->mask + BUCKET_SIZE + 1);
 		if (n_threads > 1) printf("with %u threads; ", n_threads); else printf("no multithreading; ");
 		if (bulk) printf("with"); else printf("no"); printf(" bulk counting;");
 		puts("");
@@ -2423,31 +2479,32 @@ int main(int argc, char **argv) {
 					key_update(&next.key, &board, move);
 					if (d == 1) count = 1;
 					else if (bulk && d == 2) count = count_moves(&next);
-					else count = perft(&next, hashtable, &task_pool, depth - 1, bulk);
+					else count = perft(&next, depth - 1);
 					total += count;
 					partial_time += chrono();
 					total_time += partial_time;
-					printf("%5s %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", move_to_string(move, NULL), count, partial_time, count / partial_time);
+					printf("%5s %20s leaves in %10.3f s %14.0f leaves/s\n", move_to_string(move, NULL), counter_to_str(count), partial_time, count / partial_time);
 				}
 			}
 		}
 	} else {
 		for (uint32_t r = 1; r <= n_repetition; ++r) {
 			for (uint32_t d = (loop ? 1 : depth); d <= depth; ++d) {
-				if (hashtable) hash_clear(hashtable);
+				if (hash_table) hash_clear(hash_table);
 				partial_time = -chrono();
-				count = perft(&board, hashtable, &task_pool, d, bulk);
+				count = perft(&board, d);
 				total += count;
 				partial_time += chrono();
 				total_time += partial_time;
-				printf("perft %2d : %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", d, count, partial_time, count / partial_time);
+				printf("perft %2d : %20s leaves in %10.3f s %14.0f leaves/s\n", d, counter_to_str(count), partial_time, count / partial_time);
 			}
 		}
 	}
-	if (div || loop || n_repetition > 1) printf("total    : %18" PRIu64 " leaves in %10.3f s %14.0f leaves/s\n", total, total_time, total / total_time);
+	if (div || loop || n_repetition > 1) printf("total    : %20s leaves in %10.3f s %14.0f leaves/s\n", counter_to_str(total), total_time, total / total_time);
 
-	hash_destroy(hashtable);
-	taskpool_free(&task_pool);
+	// cleanup
+	hash_destroy(hash_table);
+	taskpool_destroy(task_pool);
 	free(MASK->bishop.attack);
 	free(MASK->rook.attack);
 
