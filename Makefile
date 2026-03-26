@@ -114,7 +114,7 @@ pgo:
 	$(EXE) -d 7 -b -t 4 -h 256 -q;
 	@$(PGO_MERGE)
 	@echo Re-compiling with profile-guided optimization...
-	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(EXE)
+	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) -static mperft.c -o $(EXE)
 
 pgo-128:
 	@$(MAKE) pgo COUNT=128
