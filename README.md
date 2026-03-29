@@ -48,9 +48,9 @@ build-clang.bat native
 
 ```
 $ mperft -d 12 --fast -l
-Magic Perft version 4.0 (c) Richard Delorme 2020 - 2026
+Magic Perft version 5.0 (c) Richard Delorme 2020 - 2026
 Bitboard move generation based on magic (pext) bitboards
-Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 threads; with bulk counting;
+Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 threads; with nullmove counting.
   a b c d e f g h
 8 r n b q k b n r 8
 7 p p p p p p p p 7
@@ -62,21 +62,20 @@ Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 thread
 1 R N B Q K B N R 1
   a b c d e f g h
 w, KQkq
-perft  1 :                 20 leaves in      0.000 s       11983726 leaves/s
-perft  2 :                400 leaves in      0.000 s      209715200 leaves/s
-perft  3 :               8902 leaves in      0.000 s      377148426 leaves/s
-perft  4 :             197281 leaves in      0.000 s      573427919 leaves/s
-perft  5 :            4865609 leaves in      0.001 s     7249677901 leaves/s
-perft  6 :          119060324 leaves in      0.004 s    29868723799 leaves/s
-perft  7 :         3195901860 leaves in      0.044 s    72115344852 leaves/s
-perft  8 :        84998978956 leaves in      0.536 s   158707039166 leaves/s
-perft  9 :      2439530234167 leaves in      5.897 s   413669140306 leaves/s
-perft 10 :     69352859712417 leaves in     63.779 s  1087387524614 leaves/s
-perft 11 :   2097651003696806 leaves in    837.672 s  2504143445218 leaves/s
-perft 12 :  62854969236701747 leaves in  16914.459 s  3716049685686 leaves/s
-total    :  65024500949358489 leaves in  17822.392 s  3648472073458 leaves/s
-full time:  17860.911 s
-```
+perft  1:                   20 leaves in      0.000 s        8388608 leaves/s
+perft  2:                  400 leaves in      0.000 s      209715200 leaves/s
+perft  3:                 8902 leaves in      0.000 s      484905120 leaves/s
+perft  4:               197281 leaves in      0.000 s      878403914 leaves/s
+perft  5:              4865609 leaves in      0.001 s     7810119897 leaves/s
+perft  6:            119060324 leaves in      0.003 s    34828790152 leaves/s
+perft  7:           3195901860 leaves in      0.034 s    93999312462 leaves/s
+perft  8:          84998978956 leaves in      0.407 s   208810741269 leaves/s
+perft  9:        2439530234167 leaves in      4.807 s   507469426465 leaves/s
+perft 10:       69352859712417 leaves in     52.443 s  1322442452178 leaves/s
+perft 11:     2097651003696806 leaves in    692.291 s  3030012648995 leaves/s
+perft 12:    62854969236701747 leaves in  13964.894 s  4500927164567 leaves/s
+total   :    65024500949358489 leaves in  14714.880 s  4418962235419 leaves/s
+full time:  14762.732 s
 
 ## History
 - Version 1.0 
