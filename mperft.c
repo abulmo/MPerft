@@ -1,7 +1,7 @@
 /**
  * @file mperft.c
  *
- * @brief perft using magic bitboard, bulk counting, multithreading & transposition table.
+ * @brief perft using magic bitboard, nullmove bulk counting, multithreading & transposition table.
  *
  * @author Richard Delorme
  * @copyright 2020-2026
@@ -68,7 +68,7 @@
  * Note that a legal position can't have more than 218 moves:
  * https://lichess.org/@/Tobs40/blog/why-a-reachable-position-can-have-at-most-218-playable-moves/a5xdxeqs
  */
-enum : size_t { MOVE_SIZE = 256 };
+enum : size_t { MOVE_SIZE = 256, MAP_SIZE = 16 };
 
 /** Bitboard: 64-bit unsigned integer representing a bitboard */
 typedef uint64_t Bitboard;
@@ -102,7 +102,7 @@ typedef enum : int {
 	A6, B6, C6, D6, E6, F6, G6, H6,
 	A7, B7, C7, D7, E7, F7, G7, H7,
 	A8, B8, C8, D8, E8, F8, G8, H8,
-	BOARD_SIZE, ENPASSANT_NONE = BOARD_SIZE, BOARD_OUT = -1
+	BOARD_SIZE, SQUARE_NONE = BOARD_SIZE, BOARD_OUT = -1
 } Square;
 
 /** Piece: Enum representing the pieces on the board */
@@ -129,6 +129,7 @@ typedef struct {
 
 /** Attack: Struct to compute the target squares of a sliding piece on the board */
 typedef struct {
+	Bitboard full_mask; ///< Bitboard mask for the piece
 	Bitboard mask; ///< Bitboard mask for the attack
 	Bitboard magic; ///< Bitboard magic for the attack
 	Bitboard shift; ///< Bitboard shift for the attack
@@ -148,8 +149,8 @@ typedef struct {
 	Bitboard enpassant; ///< Bitboard mask for the enpassant squares
 	Bitboard knight; ///< Bitboard mask for the knight squares
 	Bitboard king; ///< Bitboard mask for the king squares
-	Attack bishop; ///< Bitboard mask for the bishop squares
-	Attack rook; ///< Bitboard mask for the rook squares
+	Attack bishop; ///< Attack for the bishop squares
+	Attack rook; ///< Attack for the rook squares
 } Mask;
 
 /** Board: Struct to represent the chess board */
@@ -171,6 +172,30 @@ typedef struct {
 	int n; ///< Number of moves in the array
 	int i; ///< Index of the current move
 } MoveArray;
+
+/** Map: Struct to represent a map of moves */
+typedef struct {
+	Bitboard to; ///< A bitboard with all the to squares
+	Square from; ///< The from square
+	Piece piece; ///< The piece type
+} Map;
+
+/** PawnMap: Struct to represent a map of pawn moves */
+typedef struct {
+	Bitboard left_capture; ///< A bitboard with all the to squares for all capture to the left side
+	Bitboard right_capture; ///< A bitboard with all the to squares for all capture to the right side
+	Bitboard enpassant; ///< A bitboard with all the to squares for all en passant captures
+	Bitboard push; ///< A bitboard with all the to squares for all push moves
+	Bitboard double_push; ///< A bitboard with all the to squares for all double push moves
+} PawnMap;
+
+/** MapArray: Struct to represent an array of maps */
+typedef struct {
+	Map map[MAP_SIZE]; ///< Array of maps
+	PawnMap pawn_map; ///< pawn map
+	int n; ///< Number of maps in the array
+	int i; ///< Index of the current map
+} MapArray;
 
 /** Hash: Struct to represent an entry in the transposition table */
 typedef struct {
@@ -277,6 +302,7 @@ static Key KEY_PLAY; ///< Key to switch players
 static HashTable *hash_table = NULL;
 static TaskPool *task_pool = NULL;
 static bool bulk = false;
+static bool nullmove = false;
 
 /* function declaration */
 static inline Piece board_get_piece(const Board*, const Square);
@@ -292,7 +318,7 @@ static Counter perft(const Board*, const uint32_t);
  * @param buf Buffer to store the result
  * @return Pointer to the buffer
  */
-static char *counter_to_str(Counter count) {
+static char *counter_to_string(Counter count) {
 	static char buf[64];
 
 	unsigned long long a = count / 1000000000000000000ULL;
@@ -556,16 +582,6 @@ static inline Square square_next(Bitboard *b) {
  * @param x Square to iterate over
  */
 #define foreach_square(x) for ((x) = A1; (x) < BOARD_SIZE; ++(x))
-
-/**
- * @brief Check if square 'x' is on 7th rank
- * @param x Square to check
- * @param c Color of the square
- * @return True if square is on 7th rank, false otherwise
- */
-static inline bool is_on_seventh_rank(const Square x, const Color c) {
-	return c ? rank(x) == 1 : rank(x) == 6;
-}
 
 /**
  * @brief Check if square 'x' is on 2nd rank
@@ -987,7 +1003,7 @@ static void key_update(Key *key, const Board *board, const Move move) {
 	const Color o = opponent(c);
 	Piece p = move_piece(move);
 	CPiece cp = cpiece_make(p, c);
-	Square enpassant = ENPASSANT_NONE;
+	Square enpassant = SQUARE_NONE;
 
 	*key = board->key;
 
@@ -1143,6 +1159,7 @@ static void init(const uint64_t seed) {
 		inside = ~(((RANK[0] | RANK[7]) & ~RANK[r]) | ((COLUMN[0] | COLUMN[7]) & ~COLUMN[f]));
 
 		//magic bishop
+		mask->bishop.full_mask = mask->diagonal | mask->antidiagonal;
 		mask->bishop.mask = (mask->diagonal | mask->antidiagonal) & inside;
 		mask->bishop.shift = stdc_count_zeros_ull(mask->bishop.mask);
 		mask->bishop.magic = bishop_magic[x];
@@ -1153,6 +1170,7 @@ static void init(const uint64_t seed) {
 		} while (o);
 
 		// magic rook
+		mask->rook.full_mask = mask->rank | mask->file;
 		mask->rook.mask = (mask->rank | mask->file) & inside;
 		mask->rook.shift = stdc_count_zeros_ull(mask->rook.mask);
 		mask->rook.magic = rook_magic[x];
@@ -1178,16 +1196,42 @@ static void init(const uint64_t seed) {
 	for (c = 1; c < 16; ++c) key_init(KEY_CASTLING + c, random);
 
 	foreach_square (x) key_init(KEY_ENPASSANT + x, random);
-	key_init(KEY_ENPASSANT + ENPASSANT_NONE, random);
+	key_init(KEY_ENPASSANT + SQUARE_NONE, random);
 }
 
-/**
- * @brief Check if an enpassant move is possible
- * @param board Board to check
- * @return True if enpassant is possible, false otherwise
- */
-static inline bool board_enpassant(const Board *board) {
-	return board->enpassant != ENPASSANT_NONE;
+static Bitboard get_pins(const Board *board, const Square k, const Color king_color, const Color pins_color) {
+	const Color o = opponent(king_color);
+	Bitboard bq = (board->piece[BISHOP] + board->piece[QUEEN]) & board->color[o];
+	Bitboard rq = (board->piece[ROOK] + board->piece[QUEEN]) & board->color[o];
+	const Bitboard pieces = board->color[WHITE] + board->color[BLACK];
+	Bitboard b, checkers, pins = 0;
+	Square x;
+
+	// bishop or queen: all square reachable from the king square.
+	b = bishop_attack(pieces, k, -1ULL);
+	checkers = b & bq;
+	b &= board->color[pins_color];
+	if (b) {
+		b = bishop_attack(pieces ^ b, k, bq ^ checkers);
+		while (b) {
+			x = square_next(&b);
+			pins |= MASK[x].between[k] & board->color[pins_color];
+		}
+	}
+
+	// rook or queen: all square reachable from the king square.
+	b = rook_attack(pieces, k, -1ULL);
+	checkers = b & rq;
+	b &= board->color[pins_color];
+	if (b) {
+		b = rook_attack(pieces ^ b, k, rq ^ checkers);
+		while (b) {
+			x = square_next(&b);
+			pins |= MASK[x].between[k] & board->color[pins_color];
+		}
+	}
+
+	return pins;
 }
 
 /**
@@ -1273,7 +1317,7 @@ static void board_init(Board *board) {
 	board->color[BLACK] =  0xFFFF000000000000ULL;
 	board->pinned = board->checkers = 0;
 	board->castling = 15;
-	board->enpassant = ENPASSANT_NONE; // illegal enpassant square
+	board->enpassant = SQUARE_NONE; // illegal enpassant square
 	board->x_king[WHITE] = E1;
 	board->x_king[BLACK] = E8;
 	board->player = WHITE;
@@ -1347,7 +1391,7 @@ static void board_set(Board *board, const char *string) {
 	} else board->castling &= ~12;
 
 	// en passant
-	x = ENPASSANT_NONE;
+	x = SQUARE_NONE;
 	s = parse_next(s);
 	if (*s != '-' && !square_parse(&s, &x)) parse_error(string, s, "FEN: bad enpassant square");
 	board->enpassant = x;
@@ -1379,7 +1423,7 @@ static void board_copymake(const Board *board, const Move move, Board *next) {
 	*next = *board;
 
 	// update chess board informations
-	next->enpassant = ENPASSANT_NONE;
+	next->enpassant = SQUARE_NONE;
 	next->castling &= MASK_CASTLING[from] & MASK_CASTLING[to];
 	// move the piece
 	next->piece[p] ^= b_from;
@@ -1451,10 +1495,9 @@ static void board_print(const Board *board, FILE *output) {
 	if (board->castling & CAN_CASTLE_QUEENSIDE[WHITE]) fputc('Q', output);
 	if (board->castling & CAN_CASTLE_KINGSIDE[BLACK]) fputc('k', output);
 	if (board->castling & CAN_CASTLE_QUEENSIDE[BLACK]) fputc('q', output);
-	if (board_enpassant(board))	fprintf(output, ", ep: %c%c", file(ep) + 'a', rank(ep) + '1');
+	if (board->enpassant != SQUARE_NONE) fprintf(output, ", ep: %c%c", file(ep) + 'a', rank(ep) + '1');
 	fputc('\n', output);
 }
-
 
 /**
  * @brief Check if a square is attacked.
@@ -1483,10 +1526,6 @@ static bool board_is_square_attacked(const Board *board, const Square x, const C
  * @return Pointer to next move
  */
 static inline Move* push_move(Move *move, const Piece piece, const Square from, const Square to) {
-	assert(piece >= PAWN && piece < PIECE_SIZE);
-	assert(from >= A1 && from <= H8);
-	assert(to >= A1 && to <= H8);
-
 	*move++ = piece | (from << 3) | (to << 9);
 	return move;
 }
@@ -1500,9 +1539,6 @@ static inline Move* push_move(Move *move, const Piece piece, const Square from, 
  */
 static inline Move* push_promotion(Move *move, const Square from, const Square to) {
 	const Move m = PAWN | (from << 3) | (to << 9);
-
-	assert(from >= A1 && from <= H8);
-	assert(to >= A1 && to <= H8);
 
 	*move++ = m | QUEEN_PROMOTION;
 	*move++ = m | KNIGHT_PROMOTION;
@@ -1518,8 +1554,11 @@ static inline Move* push_promotion(Move *move, const Square from, const Square t
  * @param from From square
  * @return Pointer to next move
  */
-static inline Move* push_moves(Move *move, Bitboard attack, const Piece piece, const Square from) {
+static inline Move* push_moves(Move *move, const Map *map) {
 	Square to;
+	uint64_t attack = map->to;
+	const Piece piece = map->piece;
+	const Square from = map->from;
 
 	while (attack) {
 		to = square_next(&attack);
@@ -1535,7 +1574,7 @@ static inline Move* push_moves(Move *move, Bitboard attack, const Piece piece, c
  * @param dir Direction
  * @return Pointer to next move
  */
-static inline Move* push_pawn_moves(Move *move, Bitboard attack, const int dir) {
+static inline Move* push_pawns(Move *move, Bitboard attack, const int dir) {
 	while (attack) {
 		const Square to = square_next(&attack);
 		move = push_move(move, PAWN, to - dir, to);
@@ -1559,184 +1598,45 @@ static inline Move *push_promotions(Move *move, Bitboard attack, const int dir) 
 }
 
 /**
- * @brief count all legal moves
+ * @brief push map
+ */
+static inline Map* map_push(Map *map, const Bitboard attack, const Square from, const Piece piece) {
+	if (attack) {
+		map->to =attack;
+		map->from = from;
+		map->piece = piece;
+		++map;
+	}
+	return map;
+}
+
+
+/**
+ * @brief generate all moves' maps.
  * @param board Board state
+ * @param map Array of maps to fill
+ * @param pawn_map Pawn map to fill
+ * @param c Color of the player to generate moves for
  * @return Number of moves generated
  */
-static int count_moves(const Board *board) {
-	const Color c = board->player;
+static int generate_maps(const Board *board, Map *map, PawnMap *pawn_map, const Color c) {
 	const Color o = opponent(c);
 	const Square k = board->x_king[c];
 	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
 	const Bitboard occupied_no_king = occupied ^ square_to_bit(k);
-	const Bitboard bq = board->piece[BISHOP] | board->piece[QUEEN];
-	const Bitboard rq = board->piece[ROOK] | board->piece[QUEEN];
-	const Bitboard pinned = board->pinned;
+	const Bitboard pinned = c == board->player ? board->pinned : get_pins(board, k, c, c);
 	const Bitboard unpinned = board->color[c] & ~pinned;
-	const Bitboard checkers = board->checkers;
+	const Bitboard checkers = c == board->player ? board->checkers : 0;
+	const Square enpassant = c == board->player ? board->enpassant : SQUARE_NONE;
 	const int pawn_left = PUSH[c] - 1;
 	const int pawn_right = PUSH[c] + 1;
 	const int pawn_push = PUSH[c];
 	const int *dir = MASK[k].direction;
-	Bitboard target, piece, attack;
+	Bitboard target, piece, attack, k_attack = 0;
 	Bitboard empty = ~occupied;
 	Bitboard enemy = board->color[o];
-	Square from, to, ep, x_checker = ENPASSANT_NONE;
-	int d, count = 0;
-
-	// in check: capture or block the (single) checker if any;
-	if (checkers) {
-		if (stdc_has_single_bit_ull(checkers)) {
-			x_checker = square_first(checkers);
-			empty = MASK[k].between[x_checker];
-			enemy = checkers;
-		} else {
-			empty = enemy  = 0;
-		}
-		target = enemy | empty;
-
-	// not in check: castling & pinned pieces moves
-	} else {
-		target = enemy | empty;
-
-		if ((board->castling & CAN_CASTLE_KINGSIDE[c])
-			&& (occupied & MASK[k].between[k + 3]) == 0
-			&& !board_is_square_attacked(board, k + 1, o, occupied)
-			&& !board_is_square_attacked(board, k + 2, o, occupied)) {
-				++count;
-		}
-		if ((board->castling & CAN_CASTLE_QUEENSIDE[c])
-			&& (occupied & MASK[k].between[k - 4]) == 0
-			&& !board_is_square_attacked(board, k - 1, o, occupied)
-			&& !board_is_square_attacked(board, k - 2, o, occupied)) {
-				++count;
-		}
-
-		// pinned pieces
-		// pawn (pinned)
-		piece = board->piece[PAWN] & pinned;
-		while (piece) {
-			from = square_next(&piece);
-			d = dir[from];
-			if (d == abs(pawn_left) && (square_to_bit(from + pawn_left) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
-			else if (d == abs(pawn_right) && (square_to_bit(from + pawn_right) & pawn_attack(from, c, enemy))) count += is_on_seventh_rank(from, c) ? 4 : 1;
-			if (d == abs(pawn_push) && (square_to_bit(to = from + pawn_push) & empty)) {
-				++count;
-				if (is_on_second_rank(from, c) && (square_to_bit(to + pawn_push) & empty)) ++count;
-			}
-		}
-		// bishop or queen (pinned)
-		piece = bq & pinned;
-		while (piece) {
-			from = square_next(&piece);
-			d = dir[from];
-			if (d == 9) count += stdc_count_ones_ull(bishop_attack(occupied, from, target & MASK[from].diagonal));
-			else if (d == 7) count += stdc_count_ones_ull(bishop_attack(occupied, from, target & MASK[from].antidiagonal));
-		}
-		// rook or queen (pinned)
-		piece = rq & pinned;
-		while (piece) {
-			from = square_next(&piece);
-			d = dir[from];
-			attack = 0;
-			if (d == 1) count += stdc_count_ones_ull(rook_attack(occupied, from, target & MASK[from].rank));
-			else if (d == 8) count += stdc_count_ones_ull(rook_attack(occupied, from, target & MASK[from].file));
-		}
-	}
-
-	// enpassant capture
-	if (board_enpassant(board) && (!checkers || x_checker == board->enpassant - pawn_push)) {
-		to = board->enpassant;
-		ep = to - pawn_push;
-		from = ep - 1;
-		piece = square_to_bit(from);
-		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & piece)) {
-			piece ^= occupied ^ square_to_bit(ep) ^ square_to_bit(to);
-			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
-		}
-		from = ep + 1;
-		piece = square_to_bit(from);
-		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & piece)) {
-			piece ^= occupied ^ square_to_bit(ep) ^ square_to_bit(to);
-			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) ++count;
-		}
-	}
-
-	// pawn
-	piece = board->piece[PAWN] & unpinned;
-	attack = (c ? (piece & ~COLUMN[0]) >> 9 : (piece & ~COLUMN[0]) << 7) & enemy;
-	count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]) + stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
-
-	attack = (c ? (piece & ~COLUMN[7]) >> 7 : (piece & ~COLUMN[7]) << 9) & enemy;
-	count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]) + stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
-
-	attack = (c ? piece >> 8 : piece << 8) & empty;
-	count += 4 * stdc_count_ones_ull(attack & PROMOTION_RANK[c]);
-	count += stdc_count_ones_ull(attack & ~PROMOTION_RANK[c]);
-	attack = (c ? (((piece & RANK[6]) >> 8) & ~occupied) >> 8 : (((piece & RANK[1]) << 8) & ~occupied) << 8) & empty;
-	count += stdc_count_ones_ull(attack);
-
-	// knight
-	piece = board->piece[KNIGHT] & unpinned;
-	while (piece) {
-		from = square_next(&piece);
-		attack = knight_attack(from, target);
-		count += stdc_count_ones_ull(attack);
-	}
-
-	// bishop or queen
-	piece = bq & unpinned;
-	while (piece) {
-		from = square_next(&piece);
-		attack = bishop_attack(occupied, from, target);
-		count += stdc_count_ones_ull(attack);
-	}
-
-	// rook or queen
-	piece = rq & unpinned;
-	while (piece) {
-		from = square_next(&piece);
-		attack = rook_attack(occupied, from, target);
-		count += stdc_count_ones_ull(attack);
-	}
-
-	// king
-	target = board->color[o] | ~occupied;
-	attack = king_attack(k, target);
-	while (attack) {
-		to = square_next(&attack);
-		if (!board_is_square_attacked(board, to, o, occupied_no_king)) ++count;
-	}
-
-	return count;
-}
-
-/**
- * @brief Generate all legal moves
- * @param board Board state
- * @param move Array of moves
- * @return Number of moves generated
- */
-static int generate_moves(const Board *board, Move *move) {
-	const Color c = board->player;
-	const Color o = opponent(c);
-	const Square k = board->x_king[c];
-	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
-	const Bitboard occupied_no_king = occupied & ~square_to_bit(k);
-	const Bitboard bq = board->piece[BISHOP] | board->piece[QUEEN];
-	const Bitboard rq = board->piece[ROOK] | board->piece[QUEEN];
-	const Bitboard pinned = board->pinned;
-	const Bitboard unpinned = board->color[c] & ~pinned;
-	const Bitboard checkers = board->checkers;
-	const int pawn_left = PUSH[c] - 1;
-	const int pawn_right = PUSH[c] + 1;
-	const int pawn_push = PUSH[c];
-	const int *dir = MASK[k].direction;
-	const Move *start = move;
-	Bitboard target, piece, attack;
-	Bitboard empty = ~occupied;
-	Bitboard enemy = board->color[o];
-	Square from, to, ep, x_checker = ENPASSANT_NONE;
+	Square from, to, ep, x_checker = SQUARE_NONE;
+	const Map *start = map;
 	int d;
 
 	// in check: capture or block the (single) checker if any;
@@ -1753,35 +1653,32 @@ static int generate_moves(const Board *board, Move *move) {
 	// not in check: castling & pinned pieces moves
 	} else {
 		target = enemy | empty;
+
 		// castling
 		if ((board->castling & CAN_CASTLE_KINGSIDE[c])
 			&& (occupied & MASK[k].between[k + 3]) == 0
 			&& !board_is_square_attacked(board, k + 1, o, occupied)
 			&& !board_is_square_attacked(board, k + 2, o, occupied)) {
-				move = push_move(move, KING, k, k + 2);
+				k_attack |= square_to_bit(k + 2);
 		}
 		if ((board->castling & CAN_CASTLE_QUEENSIDE[c])
 			&& (occupied & MASK[k].between[k - 4]) == 0
 			&& !board_is_square_attacked(board, k - 1, o, occupied)
 			&& !board_is_square_attacked(board, k - 2, o, occupied)) {
-				move = push_move(move, KING, k, k - 2);
+				k_attack |= square_to_bit(k - 2);
 		}
 
+		// pinned pieces
 		// pawn (pinned)
 		piece = board->piece[PAWN] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			if (d == abs(pawn_left) && (square_to_bit(to = from + pawn_left) & pawn_attack(from, c, enemy))) {
-				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move, PAWN, from, to);
-			} else if (d == abs(pawn_right) && (square_to_bit(to = from + pawn_right) & pawn_attack(from, c, enemy))) {
-				move = is_on_seventh_rank(from, c) ? push_promotion(move, from, to) : push_move(move, PAWN, from, to);
-			}
+			if (d == abs(pawn_left) && (square_to_bit(to = from + pawn_left) & pawn_attack(from, c, enemy))) pawn_map->left_capture = square_to_bit(to);
+			else if (d == abs(pawn_right) && (square_to_bit(to = from + pawn_right) & pawn_attack(from, c, enemy))) pawn_map->right_capture = square_to_bit(to);
 			if (d == abs(pawn_push) && (square_to_bit(to = from + pawn_push) & empty)) {
-				move = push_move(move, PAWN, from, to);
-				if (is_on_second_rank(from, c) && (square_to_bit(to += pawn_push) & empty)) {
-					move = push_move(move, PAWN, from, to);
-				}
+				pawn_map->push |= square_to_bit(to);
+				if (is_on_second_rank(from, c) && (square_to_bit(to += pawn_push) & empty)) pawn_map->double_push = square_to_bit(to);
 			}
 		}
 		// bishop (pinned)
@@ -1789,121 +1686,185 @@ static int generate_moves(const Board *board, Move *move) {
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			if (d == 9) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].diagonal), BISHOP, from);
-			else if (d == 7) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].antidiagonal), BISHOP, from);
+			if (d == 9) map = map_push(map, bishop_attack(occupied, from, target & MASK[from].diagonal), from, BISHOP);
+			else if (d == 7) map = map_push(map, bishop_attack(occupied, from, target & MASK[from].antidiagonal), from, BISHOP);
 		}
+
 		// rook (pinned)
 		piece = board->piece[ROOK] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			if (d == 1) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].rank), ROOK, from);
-			else if (d == 8) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].file), ROOK, from);
+			if (d == 1) map = map_push(map, rook_attack(occupied, from, target & MASK[from].rank), from, ROOK);
+			else if (d == 8) map = map_push(map, rook_attack(occupied, from, target & MASK[from].file), from, ROOK);
 		}
+
 		// queen (pinned)
 		piece = board->piece[QUEEN] & pinned;
 		while (piece) {
 			from = square_next(&piece);
 			d = dir[from];
-			if (d == 9) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].diagonal), QUEEN, from);
-			else if (d == 7) move = push_moves(move, bishop_attack(occupied, from, target & MASK[from].antidiagonal), QUEEN, from);
-			else if (d == 1) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].rank), QUEEN, from);
-			else if (d == 8) move = push_moves(move, rook_attack(occupied, from, target & MASK[from].file), QUEEN, from);
+			if (d == 1) map = map_push(map, rook_attack(occupied, from, target & MASK[from].rank), from, QUEEN);
+			else if (d == 8) map = map_push(map, rook_attack(occupied, from, target & MASK[from].file), from, QUEEN);
+			else if (d == 9) map = map_push(map, bishop_attack(occupied, from, target & MASK[from].diagonal), from, QUEEN);
+			else if (d == 7) map = map_push(map, bishop_attack(occupied, from, target & MASK[from].antidiagonal), from, QUEEN);
 		}
+
 	}
 
 	// enpassant capture
-	if (board_enpassant(board) && (!checkers || x_checker == board->enpassant - pawn_push)) {
+	if (enpassant != SQUARE_NONE && (!checkers || x_checker == enpassant - pawn_push)) {
+		const Bitboard bq = (board->piece[BISHOP] | board->piece[QUEEN]) & board->color[o];
+		const Bitboard rq = (board->piece[ROOK] | board->piece[QUEEN]) & board->color[o];
 		to = board->enpassant;
 		ep = to - pawn_push;
-		from = ep - 1;
-		attack = square_to_bit(from);
-		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & attack)) {
-			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
-			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) {
-				move = push_move(move, PAWN, from, to);
-			}
+		if (file(to) > 0 && (board->piece[PAWN] & board->color[c] & (piece = square_to_bit(ep - 1)))) {
+			attack = occupied ^ piece  ^ square_to_bit(ep) ^ square_to_bit(to);
+			if (!bishop_attack(attack, k, bq) && !rook_attack(attack, k, rq)) pawn_map->enpassant |= piece;
 		}
-		from = ep + 1;
-		attack = square_to_bit(from);
-		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & attack)) {
-			piece = occupied ^ square_to_bit(from) ^ square_to_bit(ep) ^ square_to_bit(to);
-			if (!bishop_attack(piece, k, bq & board->color[o]) && !rook_attack(piece, k, rq & board->color[o])) {
-				move = push_move(move, PAWN, from, to);
-			}
+		if (file(to) < 7 && (board->piece[PAWN] & board->color[c] & (piece = square_to_bit(ep + 1)))) {
+			attack = occupied ^ piece  ^ square_to_bit(ep) ^ square_to_bit(to);
+			if (!bishop_attack(attack, k, bq) && !rook_attack(attack, k, rq)) pawn_map->enpassant |= piece;
 		}
 	}
 
 	// pawn
 	piece = board->piece[PAWN] & unpinned;
-	attack = (c ? (piece & ~COLUMN[0]) >> 9 : (piece & ~COLUMN[0]) << 7) & enemy;
-	move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_left);
-	move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_left);
-
-	attack = (c ? (piece & ~COLUMN[7]) >> 7 : (piece & ~COLUMN[7]) << 9) & enemy;
-	move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_right);
-	move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_right);
-
-	attack = (c ? piece >> 8 : piece << 8) & empty;
-	move = push_promotions(move, attack & PROMOTION_RANK[c], pawn_push);
-	move = push_pawn_moves(move, attack & ~PROMOTION_RANK[c], pawn_push);
-	attack = (c ? (((piece & RANK[6]) >> 8) & ~occupied) >> 8 : (((piece & RANK[1]) << 8) & ~occupied) << 8) & empty;
-	move = push_pawn_moves(move, attack, 2 * pawn_push);
+	if (c) {
+		pawn_map->left_capture |= ((piece & ~COLUMN[0]) >> 9) & enemy;
+		pawn_map->right_capture |= ((piece & ~COLUMN[7]) >> 7) & enemy;
+		pawn_map->push |= (piece >> 8) & empty;
+		pawn_map->double_push |= ((((piece & RANK[6]) >> 8) & ~occupied) >> 8) & empty;
+	} else {
+		pawn_map->left_capture |= ((piece & ~COLUMN[0]) << 7) & enemy;
+		pawn_map->right_capture |= ((piece & ~COLUMN[7]) << 9) & enemy;
+		pawn_map->push |= (piece << 8) & empty;
+		pawn_map->double_push |= ((((piece & RANK[1]) << 8) & ~occupied) << 8) & empty;
+	}
 
 	// knight
 	piece = board->piece[KNIGHT] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
-		attack = knight_attack(from, target);
-		move = push_moves(move, attack, KNIGHT, from);
+		map = map_push(map, knight_attack(from, target), from, KNIGHT);
 	}
 
 	// bishop
 	piece = board->piece[BISHOP] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
-		attack = bishop_attack(occupied, from, target);
-		move = push_moves(move, attack, BISHOP, from);
+		map = map_push(map, bishop_attack(occupied, from, target), from, BISHOP);
 	}
 
 	// rook
 	piece = board->piece[ROOK] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
-		attack = rook_attack(occupied, from, target);
-		move = push_moves(move, attack, ROOK, from);
+		map = map_push(map, rook_attack(occupied, from, target), from, ROOK);
 	}
 
 	// queen
 	piece = board->piece[QUEEN] & unpinned;
 	while (piece) {
 		from = square_next(&piece);
-		attack = queen_attack(occupied, from, target);
-		move = push_moves(move, attack, QUEEN, from);
+		map = map_push(map, queen_attack(occupied, from, target), from, QUEEN);
 	}
 
 	// king
 	target = board->color[o] | ~occupied;
 	attack = king_attack(k, target);
+	// TODO check with a bitboard of attacked squares ? attack = king_attack(k, target) & ~attacked;
 	while (attack) {
 		to = square_next(&attack);
-		if (!board_is_square_attacked(board, to, o, occupied_no_king)) {
-			move = push_move(move, KING, k, to);
-		}
+		if (!board_is_square_attacked(board, to, o, occupied_no_king)) k_attack |= square_to_bit(to);
 	}
+	map = map_push(map, k_attack, k, KING);
 
-	return move - start;
+	return map - start;
+}
+/*
+static inline void maparray_init(MapArray *map_array) {
+	memset(&map_array->pawn_map, 0, sizeof(PawnMap));
+	map_array->n = 0;
+}
+*/
+
+static inline void maparray_generate(MapArray *map_array, const Board *board, const Color c) {
+	memset(&map_array->pawn_map, 0, sizeof(PawnMap));
+	map_array->n = generate_maps(board, map_array->map, &map_array->pawn_map, c);
+}
+
+static inline int maparray_to_count(const MapArray *map_array, const Color c) {
+	const Bitboard promotion = PROMOTION_RANK[c];
+	const Map *map = map_array->map;
+	const PawnMap *pawn_map = &map_array->pawn_map;
+	const int n = map_array->n;
+	int count = 0;
+
+	for (int i = 0; i < n; ++i) count += stdc_count_ones_ull(map[i].to);
+	count += 4 * stdc_count_ones_ull(pawn_map->left_capture & promotion) + stdc_count_ones_ull(pawn_map->left_capture & ~promotion);
+	count += 4 * stdc_count_ones_ull(pawn_map->right_capture & promotion) + stdc_count_ones_ull(pawn_map->right_capture & ~promotion);
+	count += 4 * stdc_count_ones_ull(pawn_map->push & promotion) + stdc_count_ones_ull(pawn_map->push & ~promotion);
+	count += stdc_count_ones_ull(pawn_map->enpassant);
+	count += stdc_count_ones_ull(pawn_map->double_push);
+
+	return count;
 }
 
 /**
  * @brief Generate all legal moves or captures
- * @param ma Move array
+ * @param ma Move array to fill
  * @param board Board state
  */
-static inline void movearray_generate(MoveArray *ma, const Board *board) {
+static inline void maparray_to_movearray(const MapArray *map_array, MoveArray *ma, const Color c, const Square enpassant) {
+	const Bitboard promotion = PROMOTION_RANK[c];
+	const Map *map = map_array->map;
+	const PawnMap *pawn_map = &map_array->pawn_map;
+	const int n = map_array->n;
+	const int pawn_left = PUSH[c] - 1;
+	const int pawn_right = PUSH[c] + 1;
+	const int pawn_push = PUSH[c];
+	Move *move = ma->move;
+
+	for (int i = 0; i < n; ++i) move = push_moves(move, map + i);
+
+	move = push_promotions(move, pawn_map->left_capture  &  promotion, pawn_left);
+	move = push_pawns     (move, pawn_map->left_capture  & ~promotion, pawn_left);
+	move = push_promotions(move, pawn_map->right_capture &  promotion, pawn_right);
+	move = push_pawns     (move, pawn_map->right_capture & ~promotion, pawn_right);
+	move = push_promotions(move, pawn_map->push          &  promotion, pawn_push);
+	move = push_pawns     (move, pawn_map->push          & ~promotion, pawn_push);
+	move = push_pawns     (move, pawn_map->double_push               , pawn_push * 2);
+	Bitboard from = pawn_map->enpassant;
+	while (from) move = push_move(move, PAWN, square_next(&from), enpassant);
+	*move = 0; // sentinel
+
+	ma->n = move - ma->move;
 	ma->i = 0;
-	ma->n = generate_moves(board, ma->move);
-	ma->move[ma->n] = 0;
+}
+
+/**
+ * @brief count all legal moves
+ * @param board Board state
+ * @return Number of moves generated
+ */
+static inline int count_moves(const Board *board) {
+	MapArray map_array;
+
+	maparray_generate(&map_array, board, board->player);
+	return maparray_to_count(&map_array, board->player);
+}
+
+/**
+ * @brief Generate all legal moves or captures
+ * @param ma Move array to fill
+ * @param board Board state
+ */
+static inline void movearray_generate(MoveArray *move_array, const Board *board) {
+	MapArray map_array;
+
+	maparray_generate(&map_array, board, board->player);
+	maparray_to_movearray(&map_array, move_array, board->player, board->enpassant);
 }
 
 /**
@@ -2156,7 +2117,9 @@ static TaskPool* taskpool_create(const int n_workers) {
 	if (task_pool == NULL) memory_error(__func__);
 	task_pool->n_tasks = task_pool->n_idle = n_workers;
 	task_pool->tasks = n_workers ? malloc(n_workers * sizeof (Task)) : NULL;
+	if (n_workers && task_pool->tasks == NULL) memory_error(__func__);
 	task_pool->idle_tasks = n_workers ? malloc(n_workers * sizeof (Task*)) : NULL;
+	if (n_workers && task_pool->idle_tasks == NULL) memory_error(__func__);
 	spin_init(&task_pool->spin);
 	for (int i = 0 ; i < n_workers; ++i) {
 		Task *task = task_pool->tasks + i;
@@ -2165,13 +2128,13 @@ static TaskPool* taskpool_create(const int n_workers) {
 	}
 	// hack: wait for all tasks to be initialized...
 	if (n_workers) {
-		while (task_pool->idle_tasks[0]->loop == false) thrd_sleep(&ONE_MS, NULL);
+		while(task_pool->idle_tasks[0]->loop == false) thrd_sleep(&ONE_MS, NULL);
 	}
 	return task_pool;
 }
 
 /**
- * @breif Free ressources of a pool of tasks
+ * @brief Free ressources of a pool of tasks
  * @param task_pool Task pool
  */
 static void taskpool_destroy(TaskPool *task_pool) {
@@ -2195,6 +2158,11 @@ static inline void node_init(Node *node) {
 
 /**
  * @brief Split the search
+ *
+ * This function looks if there is an idle task available in the task pool.
+ * If so, it assigns the task to the node and returns true. The task will
+ * then perform a perft with the given board and depth.
+ *
  * @param node Node to split
  * @param board Board to split
  * @param task_pool Task pool
@@ -2245,7 +2213,155 @@ static inline uint64_t node_wait(const Node *node) {
 }
 
 /**
- * @brief Perft at depth 2.
+ * @brief Perft with nullmove pruning
+ *
+ * @param board Board to perft
+ * @return Total count of nodes
+ */
+static int perft_nullmove(const Board *board) {
+	const Color player = board->player;
+	const Color enemy = opponent(player);
+	const Square k = board->x_king[enemy];
+	const Bitboard empty = ~(board->color[BLACK] | board->color[WHITE]);
+	const Bitboard castling[COLOR_SIZE] = {
+		((board->castling & CAN_CASTLE_QUEENSIDE[WHITE]) ? square_to_bit(C1) : 0) | ((board->castling & CAN_CASTLE_KINGSIDE[WHITE]) ? square_to_bit(G1) : 0),
+		((board->castling & CAN_CASTLE_QUEENSIDE[BLACK]) ? square_to_bit(C8) : 0) | ((board->castling & CAN_CASTLE_KINGSIDE[BLACK]) ? square_to_bit(G8) : 0),
+	};
+	const Bitboard promotion = PROMOTION_RANK[player];
+	const Bitboard enemy_pawn = board->piece[PAWN] & board->color[enemy];
+	const Bitboard pawn = board->piece[PAWN] & board->color[player];
+	const Bitboard knight = board->piece[KNIGHT] & board->color[player];
+	const Bitboard bishop_queen = (board->piece[BISHOP] | board->piece[QUEEN]) & board->color[player];
+	const Bitboard rook_queen = (board->piece[ROOK] | board->piece[QUEEN]) & board->color[player];
+	const Bitboard king = (board->piece[KING]) & board->color[player];
+	Board next;
+	int count = 0, enemy_count;
+	Move move;
+	MoveArray move_array;
+	Bitboard pawn_potential_move = 0;
+	Bitboard to_empty = 0; // Empty squares where the nemy can move
+	Bitboard to_capture = 0;
+	Bitboard blocking = 0;
+	MapArray player_array, enemy_array, harmful_array;
+	Bitboard harmless, king_to = 0, to;
+	Bitboard from;
+	Bitboard from_mask;
+	Bitboard to_mask;
+	Bitboard king_threat[] = {
+		MASK[k].pawn_attack[enemy], // squares from where pawns cannot check
+		MASK[k].knight, // squares from where knights cannot check
+		MASK[k].bishop.full_mask, // squares from where bishops cannot check or pin
+		MASK[k].rook.full_mask, // squares from where rooks cannot check or pin
+		MASK[k].bishop.full_mask | MASK[k].rook.full_mask, // squares from where a queen cannot check or pin
+		MASK[k].king, // squares from where the king cannot touch the opponent king
+	};
+	int i, j;
+
+	// compute map for both players
+	maparray_generate(&player_array, board, player);
+	maparray_generate(&enemy_array, board, enemy);
+
+	// perft for the next player, should be invariant after some moves
+	enemy_count = maparray_to_count(&enemy_array, enemy);
+
+	// compute to_empty: empty squares where the next player can move and to_capture, where the next player can capture
+	for (i = 0; i < enemy_array.n; i++) {
+		const Map *map = enemy_array.map + i;
+		to_empty |= map->to & empty;
+		to_capture |= map->to & ~empty;
+	}
+	to_empty |= enemy_array.pawn_map.push | enemy_array.pawn_map.double_push;
+	to_empty |= enemy_array.pawn_map.left_capture | enemy_array.pawn_map.right_capture;
+	to_capture |= enemy_array.pawn_map.left_capture | enemy_array.pawn_map.right_capture | enemy_array.pawn_map.enpassant;
+
+	// computing safe destination squares
+	if (enemy) {
+		to_empty |=  (((enemy_pawn & ~COLUMN[0]) >> 9) | ((enemy_pawn & ~COLUMN[7]) >> 7)) & empty;
+		pawn_potential_move = enemy_pawn >> 8;
+		pawn_potential_move |= (pawn_potential_move & RANK[5] & empty) >> 8;
+	} else {
+		to_empty |=  (((enemy_pawn & ~COLUMN[0]) << 7) | ((enemy_pawn & ~COLUMN[7]) << 9)) & empty;
+		pawn_potential_move = enemy_pawn << 8;
+		pawn_potential_move |= (pawn_potential_move & RANK[2] & empty) << 8;
+	}
+
+	// king: moves should not prevent the king to move (a king cannot move into check).
+	king_to = (MASK[k].king & ~board->color[enemy]) | square_to_bit(k) | castling[enemy];
+	to = king_to;
+	while (to) {
+		const Square nk = square_next(&to);
+		blocking |= MASK[nk].pawn_attack[enemy] & pawn;
+		blocking |= MASK[nk].knight & knight;
+		Bitboard bq = bishop_queen;
+		while (bq) {
+			const Square x = square_next(&bq);
+			const int dir = MASK[nk].direction[x];
+			if (dir == 7 || dir == 9) blocking |= MASK[nk].between[x] | square_to_bit(x);
+		}
+		Bitboard rq = rook_queen;
+		while (rq) {
+			const Square x = square_next(&rq);
+			const int dir = MASK[nk].direction[x];
+			if (dir == 1 || dir == 8) blocking |= MASK[nk].between[x] | square_to_bit(x);
+		}
+		blocking |= MASK[nk].king & king;
+
+		king_threat[PAWN]   |= MASK[nk].pawn_attack[enemy];
+		king_threat[KNIGHT] |= MASK[nk].knight;
+		king_threat[BISHOP] |= MASK[nk].bishop.full_mask;
+		king_threat[ROOK]   |= MASK[nk].rook.full_mask;
+		king_threat[QUEEN]  |= MASK[nk].bishop.full_mask | MASK[nk].rook.full_mask;
+		king_threat[KING]   |= MASK[nk].king;
+	}
+
+	// (non pawn) moves
+	harmful_array.n = 0;
+	harmful_array.pawn_map = player_array.pawn_map;
+	from_mask = ~(blocking | to_capture | pawn_potential_move);
+	to_mask = ~to_empty & empty & ~blocking;
+	for (i = j = 0; i < player_array.n; i++) {
+		const Map *map = player_array.map + i;
+		from = square_to_bit(map->from);
+
+		harmless = 0;
+		if ((from & from_mask) && (map->to & king_to) == 0) {
+			harmless = map->to & to_mask;
+			harmless &= ~king_threat[map->piece];
+			if (map->piece == KING) harmless &= ~castling[player];
+			count += stdc_count_ones_ull(harmless) * enemy_count;
+		}
+
+		harmful_array.map[j].to = map->to ^ harmless;
+		if (harmful_array.map[j].to) {
+			harmful_array.map[j].from = map->from;
+			harmful_array.map[j].piece = map->piece;
+			j++;
+		}
+	}
+	harmful_array.n = j;
+
+	// pawn push
+	from = pawn & from_mask;
+	harmless = (player ? from >> 8 : from << 8) & harmful_array.pawn_map.push & to_mask & ~promotion & ~king_threat[PAWN];
+	harmful_array.pawn_map.push &= ~harmless;
+	count += stdc_count_ones_ull(harmless) * enemy_count;
+
+	harmless = (player ? harmless >> 8 : harmless << 8 ) & harmful_array.pawn_map.double_push & to_mask & ~king_threat[PAWN];
+	harmful_array.pawn_map.double_push &= ~harmless;
+	count += stdc_count_ones_ull(harmless) * enemy_count;
+
+	maparray_to_movearray(&harmful_array, &move_array, player, board->enpassant);
+
+	while ((move = movearray_next(&move_array)) != 0) {
+		board_copymake(board, move, &next);
+		count += count_moves(&next);
+	}
+	return count;
+}
+
+/**
+ * @brief Perft depth 2 (non-recursive)
+ *
  * @param board Board to analyze
  * @return Total count of nodes
  */
@@ -2264,6 +2380,7 @@ static int perft_2(const Board *board) {
 }
 
 
+
 /**
  * @brief Recursive Perft with optional hashtable, pool of tasks, bulk counting & capture only generation.
  * @param board Board to analyze
@@ -2272,7 +2389,6 @@ static int perft_2(const Board *board) {
  */
 static Counter perft(const Board *board, const uint32_t depth) {
 	const bool use_hash = (hash_table && depth >= MIN_HASH_DEPTH);
-	const bool use_bulk_counting = (bulk && depth == 2);
 	Board next;
 	Counter count = 0, hash_count;
 	Move move;
@@ -2280,7 +2396,10 @@ static Counter perft(const Board *board, const uint32_t depth) {
 	Node node;
 	Key key;
 
-	if (use_bulk_counting) return perft_2(board);
+	if (depth == 2) {
+		if (nullmove) return perft_nullmove(board);
+		else if (bulk) return perft_2(board);
+	}
 
 	movearray_generate(&ma, board);
 	node_init(&node);
@@ -2351,7 +2470,10 @@ static void test() {
 		board_set(&board, t->fen);
 		Counter count = perft(&board, t->depth);
 		if (count == t->result) printf(" passed\n");
-		else printf(" FAILED ! %s != %s\n", counter_to_str(count), counter_to_str(t->result));
+		else {
+			printf(" FAILED ! %s", counter_to_string(count));
+			printf("!= %s\n", counter_to_string(t->result));
+		}
 	}
 }
 
@@ -2381,11 +2503,13 @@ int main(int argc, char **argv) {
 	// argument
 	for (int i = 1; i < argc; ++i) {
 		if (!strcmp(argv[i], "--bulk") || !strcmp(argv[i], "-b")) bulk = true;
+		else if (!strcmp(argv[i], "--nullmove") || !strcmp(argv[i], "-n")) nullmove = true;
 		else if (!strcmp(argv[i], "--depth") || !strcmp(argv[i], "-d")) depth = atoi(argv[++i]);
 		else if (isdigit((int) argv[i][0])) depth = atoi(argv[i]);
 		else if (!strcmp(argv[i], "--div")) div = true;
 		else if (!strcmp(argv[i], "--fast")) {
 			bulk = true;
+			nullmove = true;
 			hash_size = MAX_HASH_SIZE;
 			n_threads = N_PROCESSORS;
 		} else if (!strcmp(argv[i], "--fen") || !strcmp(argv[i], "-f")) fen = argv[++i];
@@ -2402,6 +2526,7 @@ int main(int argc, char **argv) {
 			printf("%s <args> \n", argv[0]);
 			puts("Enumerate moves. The following options are available:");
 			puts("\t--bulk|-b               Do fast bulk counting at the last ply.");
+			puts("\t--nullmove|-n           Do fast nullmove counting at the penultimate ply.");
 			puts("\t[--depth|-d] <depth>    Test up to this depth (default = 6).");
 			puts("\t--div                   Print a node count for each move.");
 			puts("\t--fast                  Automatically set highest settings.");
@@ -2454,14 +2579,17 @@ int main(int argc, char **argv) {
 
 	// Header output
 	if (verbose) {
-		puts("Magic Perft version 4.1 (c) Richard Delorme 2020 - 2026");
+		puts("Magic Perft version 5.0 (c) Richard Delorme 2020 - 2026");
 		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards");
 		else puts("Bitboard move generation based on magic bitboards");
 		printf("Perft setting: ");
 		if (hash_size == 0) printf("no hashing; ");
-		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ", (unsigned) (sizeof (Hash) * (hash_table->mask + BUCKET_SIZE + 1) >> 20), hash_table->mask + BUCKET_SIZE + 1);
+		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ",
+				(unsigned) (sizeof (Hash) * (hash_table->mask + BUCKET_SIZE + 1) >> 20), hash_table->mask + BUCKET_SIZE + 1);
 		if (n_threads > 1) printf("with %u threads; ", n_threads); else printf("no multithreading; ");
-		if (bulk) printf("with"); else printf("no"); printf(" bulk counting;");
+		if (nullmove) printf("with nullmove counting.");
+		else if (bulk) printf("with bulk counting.");
+		else printf("no nullmove/bulk counting.");
 		puts("");
 		board_print(&board, stdout);
 	}
@@ -2483,7 +2611,8 @@ int main(int argc, char **argv) {
 					total += count;
 					partial_time += chrono();
 					total_time += partial_time;
-					printf("%5s %20s leaves in %10.3f s %14.0f leaves/s\n", move_to_string(move, NULL), counter_to_str(count), partial_time, count / partial_time);
+					printf("%5s %20s leaves in %10.3f s %14.0f leaves/s\n",
+						move_to_string(move, NULL), counter_to_string(count), partial_time, count / partial_time);
 				}
 			}
 		}
@@ -2496,11 +2625,15 @@ int main(int argc, char **argv) {
 				total += count;
 				partial_time += chrono();
 				total_time += partial_time;
-				printf("perft %2d : %20s leaves in %10.3f s %14.0f leaves/s\n", d, counter_to_str(count), partial_time, count / partial_time);
+				printf("perft %2d: %20s leaves in %10.3f s %14.0f leaves/s\n",
+					d, counter_to_string(count), partial_time, count / partial_time);
 			}
 		}
 	}
-	if (div || loop || n_repetition > 1) printf("total    : %20s leaves in %10.3f s %14.0f leaves/s\n", counter_to_str(total), total_time, total / total_time);
+	if (div || loop || n_repetition > 1) {
+		printf("total   : %20s leaves in %10.3f s %14.0f leaves/s\n",
+			counter_to_string(total), total_time, total / total_time);
+	}
 
 	// cleanup
 	hash_destroy(hash_table);
