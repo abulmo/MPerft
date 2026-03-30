@@ -34,9 +34,10 @@ ifeq ($(CC),clang)
 		CFLAGS += -O0 -g -fno-inline -ftrapv
 	endif
 
+	LPF = LLVM_PROFILE_FILE=mperft-%p.profraw
 	BOLT = -Xlinker --emit-relocs -Xlinker -znow
-	PGO_GEN = -fprofile-instr-generate
-	PGO_USE = -fprofile-instr-use=mperft.profdata
+	PGO_GEN = -fprofile-generate
+	PGO_USE = -fprofile-use=mperft.profdata
 	PGO_MERGE = llvm-profdata merge -output=mperft.profdata *.profraw
 	COV = llvm-cov gcov -b $(EXE)
 
@@ -53,6 +54,7 @@ ifeq ($(CC),icx)
 		CFLAGS += -O0 -g -fno-inline -ftrapv
 	endif
 
+	LPF = LLVM_PROFILE_FILE=mperft-%p.profraw
 	BOLT = -Xlinker --emit-relocs
 	PGO_GEN = -fprofile-instr-generate
 	PGO_USE = -fprofile-instr-use=mperft.profdata
@@ -74,27 +76,13 @@ ifeq ($(CC),gcc)
 		CFLAGS += -O0 -g -fno-inline -fstack-protector
 	endif
 
+	LPF =
 	BOLT = -Xl,--emit-relocs -Xl,-znow
 	PGO_GEN = -fprofile-generate -lgcov
 	PGO_USE = -fprofile-use -fprofile-correction
 	PGO_MERGE =
 	COV = gcov -b $(EXE)
 
-endif
-
-#mingw 64 bits
-ifeq ($(CC),x86_64-w64-mingw32-gcc)
-	CFLAGS = -pipe -Wall -W -Wextra -pedantic -std=c23 -D__USE_MINGW_ANSI_STDIO
-	EXE = mperft.exe
-	ifeq ($(BUILD),fast)
-		CFLAGS += -O3 -flto -fwhole-program -DNDEBUG
-	else
-		CFLAGS += -O0 -g -fno-inline -fstack-protector
-	endif
-
-	PGO_GEN = -fprofile-generate -lgcov
-	PGO_USE = -fprofile-use -fprofile-correction
-	PGO_MERGE =
 endif
 
 ifeq ($(COUNT),)
@@ -106,14 +94,24 @@ ifeq ($(COUNT),128)
 endif
 
 pgo:
+	@$(MAKE) pgo-instr
+	@echo Re-compiling with profile-guided optimization...
+	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) mperft.c -o $(EXE)
+
+pgo-instr:
 	@$(MAKE) clean
 	@echo Compiling with $(CC) for $(ARCH) architecture using $(COUNT) bits large integer.
 	@echo Compiling with instrumentation for profile-guided optimization...
 	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(EXE)
 	@echo -n "Running the instrumented binary: "
-	$(EXE) -d 7 -b -t 4 -h 256 -q;
+	@$(LPF) $(BIN)/$(EXE) -d 6 -b > /dev/null
+	@$(LPF) $(BIN)/$(EXE) -d b -n > /dev/null
+	@$(LPF) $(BIN)/$(EXE) -d 7 -n -t 4 -h 256 -q  > /dev/null;
 	@$(PGO_MERGE)
-	@echo Re-compiling with profile-guided optimization...
+
+release:
+	@$(MAKE) pgo-instr
+	@echo Re-compiling with static libs and profile-guided optimization...
 	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_USE) -static mperft.c -o $(EXE)
 
 pgo-128:
@@ -125,19 +123,13 @@ no-pgo:
 	@$(CC) $(CFLAGS) -march=$(ARCH) mperft.c -o $(EXE)
 
 bolt:
-	@$(MAKE) clean
-	@echo Compiling with $(CC) for $(ARCH) architecture using $(COUNT) bits large integer.
-	@echo Compiling with instrumentation for profile-guided optimization...
-	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(EXE)
-	@echo -n "Running the instrumented binary for profile-guided optimization: "
-	./$(EXE) -d 7 -b -t 4 -h 256 -q;
-	@$(PGO_MERGE)
+	@$(MAKE) pgo-instr
 	@echo Re-compiling with profile-guided optimization...
 	@$(CC) $(CFLAGS) $(BOLT) -march=$(ARCH) $(PGO_USE) mperft.c -o $(EXE)
 	@llvm-bolt $(EXE) -instrument --instrumentation-file=$(EXE).fdata -o=$(EXE).i
 	@echo -n "Running the instrumented binary for llvm-bolt: "
-	./$(EXE).i -d 7 -b -t 4 -h 256 -q;
-	@llvm-bolt ./$(EXE) -o ./$(EXE).bolt -data=/tmp/prof.fdata -reorder-blocks=ext-tsp -reorder-functions=hfsort+ -split-functions -split-all-cold -split-eh -dyno-stats -icf=1 -use-gnu-stack -plt=hot
+	@$(BIN)/$(EXE).i -d 7 -n -t 4 -h 256 -q  > /dev/null;
+	@llvm-bolt ./$(EXE) -o ./$(EXE).bolt -data=$(EXE).fdata -reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions -split-all-cold -split-eh -dyno-stats
 
 prof:
 	@$(MAKE) no-pgo BUILD=profile
@@ -149,13 +141,12 @@ cov:
 	@$(MAKE) clean
 	@$(MAKE) no-pgo BUILD=cov
 	@echo -n "Running the instrumented binary for test coverage: "
-	@$(EXE) -d 7 -b -t 4 -h 256 -q
+	@$(EXE) -d 7 -n -t 4 -h 256 -q
 	@echo "running the coverage tool"
 	$(COV)
 
 clean:
-	@$(RM) *.o *.dyn *.gcda *.gcno pgopti* *.prof*
-	@cd $(BIN); $(RM) *.prof*
+	@$(RM) *.o *.dyn *.gcda *.gcno pgopti* *.prof* *.fdata
 
 test:
 	mperft --test -b -h 64 -t 4
