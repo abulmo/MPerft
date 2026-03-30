@@ -840,7 +840,7 @@ static inline Bitboard magic_index(const Bitboard pieces, const Attack *attack) 
  * @param target Bitboard of target squares
  * @return Bitboard of pawn attack (capture)
  */
-static inline Bitboard pawn_attack(const Square x, const Color c, const Bitboard target) {
+static inline Bitboard pawn_attack(const Square x, const Color c, const Bitboard target)  {
 	return MASK[x].pawn_attack[c] & target;
 }
 
@@ -850,7 +850,7 @@ static inline Bitboard pawn_attack(const Square x, const Color c, const Bitboard
  * @param target Bitboard of target squares
  * @return Bitboard of knight attack
  */
-static inline Bitboard knight_attack(const Square x, const Bitboard target) {
+static inline Bitboard knight_attack(const Square x, const Bitboard target)  {
 	return MASK[x].knight & target;
 }
 
@@ -883,7 +883,7 @@ static inline Bitboard rook_attack(const Bitboard pieces, const Square x, const 
  * @param target Bitboard of target squares
  * @return Bitboard of rook attack
  */
-static inline Bitboard queen_attack(const Bitboard pieces, const Square x, const Bitboard target) {
+static inline Bitboard queen_attack(const Bitboard pieces, const Square x, const Bitboard target)  {
 	return rook_attack(pieces, x, target) | bishop_attack(pieces, x, target);
 }
 
@@ -903,7 +903,7 @@ static inline Bitboard king_attack(const Square x, const Bitboard target) {
  * @param x square
  * @return A Piece
  */
-static inline Piece board_get_piece(const Board *board, const Square x) {
+static inline Piece board_get_piece(const Board *board, const Square x)  {
 	Bitboard b = square_to_bit(x);
 	Piece p;
 
@@ -919,7 +919,7 @@ static inline Piece board_get_piece(const Board *board, const Square x) {
  * @param x square
  * @return A Color.
  */
-static inline Color board_get_color(const Board *board, const Square x) {
+static inline Color board_get_color(const Board *board, const Square x)  {
 	Bitboard b = square_to_bit(x);
 	Color c;
 
@@ -936,7 +936,7 @@ static inline Color board_get_color(const Board *board, const Square x) {
  * @param x square
  * @return A CPiece
  */
-static inline CPiece board_get_cpiece(const Board *board, const Square x) {
+static inline CPiece board_get_cpiece(const Board *board, const Square x)  {
 	Piece p = board_get_piece(board, x);
 	Color c = board_get_color(board, x);
 	return c == COLOR_SIZE ? EMPTY : cpiece_make(p, c);
@@ -947,7 +947,7 @@ static inline CPiece board_get_cpiece(const Board *board, const Square x) {
  * @param key Key to initialize
  * @param r Random number generator
  */
-static inline void key_init(Key *key, Random *r) {
+static inline void key_init(Key *key, Random *r)  {
 	#ifdef USE_INT128
 		key->code = random_get_u128(r);
 	#else
@@ -961,7 +961,7 @@ static inline void key_init(Key *key, Random *r) {
  * @param key Key to xor
  * @param k Key to xor with
  */
-static inline void key_xor(Key *key, const Key *k) {
+static inline void key_xor(Key *key, const Key *k)  {
 	key->code ^= k->code;
 	key->index ^= k->index;
 }
@@ -995,7 +995,7 @@ static void key_set(Key *key, const Board *board) {
  * @param board Board to update key from
  * @param move Move to update key with
  */
-static void key_update(Key *key, const Board *board, const Move move) {
+static void key_update(Key *key, const Board *board, const Move move)  {
 	const Bitboard occupied = board->color[WHITE] | board->color[BLACK];
 	const Square from = move_from(move);
 	const Square to = move_to(move);
@@ -1199,8 +1199,15 @@ static void init(const uint64_t seed) {
 	key_init(KEY_ENPASSANT + SQUARE_NONE, random);
 }
 
-static Bitboard get_pins(const Board *board, const Square k, const Color king_color, const Color pins_color) {
-	const Color o = opponent(king_color);
+/**
+ * @brief Generate pinned pieces for the opponent side.
+ * @param board Board to generate and pinned pieces for
+ * @return Pinned pieces for the opponent side
+ */
+static Bitboard get_opponent_pins(const Board *board) {
+	const Color o = board->player;
+	const Color c = opponent(o);
+	const Square k = board->x_king[c];
 	Bitboard bq = (board->piece[BISHOP] + board->piece[QUEEN]) & board->color[o];
 	Bitboard rq = (board->piece[ROOK] + board->piece[QUEEN]) & board->color[o];
 	const Bitboard pieces = board->color[WHITE] + board->color[BLACK];
@@ -1210,24 +1217,24 @@ static Bitboard get_pins(const Board *board, const Square k, const Color king_co
 	// bishop or queen: all square reachable from the king square.
 	b = bishop_attack(pieces, k, -1ULL);
 	checkers = b & bq;
-	b &= board->color[pins_color];
+	b &= board->color[c];
 	if (b) {
 		b = bishop_attack(pieces ^ b, k, bq ^ checkers);
 		while (b) {
 			x = square_next(&b);
-			pins |= MASK[x].between[k] & board->color[pins_color];
+			pins |= MASK[x].between[k] & board->color[c];
 		}
 	}
 
 	// rook or queen: all square reachable from the king square.
 	b = rook_attack(pieces, k, -1ULL);
 	checkers = b & rq;
-	b &= board->color[pins_color];
+	b &= board->color[c];
 	if (b) {
 		b = rook_attack(pieces ^ b, k, rq ^ checkers);
 		while (b) {
 			x = square_next(&b);
-			pins |= MASK[x].between[k] & board->color[pins_color];
+			pins |= MASK[x].between[k] & board->color[c];
 		}
 	}
 
@@ -1624,7 +1631,7 @@ static int generate_maps(const Board *board, Map *map, PawnMap *pawn_map, const 
 	const Square k = board->x_king[c];
 	const Bitboard occupied = board->color[WHITE] + board->color[BLACK];
 	const Bitboard occupied_no_king = occupied ^ square_to_bit(k);
-	const Bitboard pinned = c == board->player ? board->pinned : get_pins(board, k, c, c);
+	const Bitboard pinned = c == board->player ? board->pinned : get_opponent_pins(board);
 	const Bitboard unpinned = board->color[c] & ~pinned;
 	const Bitboard checkers = c == board->player ? board->checkers : 0;
 	const Square enpassant = c == board->player ? board->enpassant : SQUARE_NONE;
@@ -1782,12 +1789,6 @@ static int generate_maps(const Board *board, Map *map, PawnMap *pawn_map, const 
 
 	return map - start;
 }
-/*
-static inline void maparray_init(MapArray *map_array) {
-	memset(&map_array->pawn_map, 0, sizeof(PawnMap));
-	map_array->n = 0;
-}
-*/
 
 static inline void maparray_generate(MapArray *map_array, const Board *board, const Color c) {
 	memset(&map_array->pawn_map, 0, sizeof(PawnMap));
@@ -2202,7 +2203,7 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
 }
 
 /**
- * @brief Wait for all tasks to terminate
+ * @brief Wait for all child tasks to terminate
  * @param node Node to wait for
  * @return Total count of nodes
  */
@@ -2215,54 +2216,63 @@ static inline uint64_t node_wait(const Node *node) {
 /**
  * @brief Perft with nullmove pruning
  *
+ * Performs a perft search with nullmove pruning. The idea is to precompute the move count of the next player playing at the last ply,
+ * and then to search the moves of the current player that do not affect the next player's moves. The resulting perft
+ * the product of the number of harmless moves of the current player and the perft of the next player. For the other moves,
+ * that affect the next player's moves, the perft is computed recursively.
+ *
  * @param board Board to perft
  * @return Total count of nodes
  */
 static int perft_nullmove(const Board *board) {
-	const Color player = board->player;
-	const Color enemy = opponent(player);
-	const Square k = board->x_king[enemy];
-	const Bitboard empty = ~(board->color[BLACK] | board->color[WHITE]);
-	const Bitboard castling[COLOR_SIZE] = {
+	const Color player = board->player; // Current player
+	const Color enemy = opponent(player); // Next player
+	const Square k = board->x_king[enemy]; // Enemy's king square
+	const Bitboard empty = ~(board->color[BLACK] | board->color[WHITE]); // Bitboard mask of empty squares
+	const Bitboard castling[COLOR_SIZE] = { // Bitboard mask of castling squares
 		((board->castling & CAN_CASTLE_QUEENSIDE[WHITE]) ? square_to_bit(C1) : 0) | ((board->castling & CAN_CASTLE_KINGSIDE[WHITE]) ? square_to_bit(G1) : 0),
 		((board->castling & CAN_CASTLE_QUEENSIDE[BLACK]) ? square_to_bit(C8) : 0) | ((board->castling & CAN_CASTLE_KINGSIDE[BLACK]) ? square_to_bit(G8) : 0),
 	};
-	const Bitboard promotion = PROMOTION_RANK[player];
-	const Bitboard enemy_pawn = board->piece[PAWN] & board->color[enemy];
-	const Bitboard pawn = board->piece[PAWN] & board->color[player];
-	const Bitboard knight = board->piece[KNIGHT] & board->color[player];
-	const Bitboard bishop_queen = (board->piece[BISHOP] | board->piece[QUEEN]) & board->color[player];
-	const Bitboard rook_queen = (board->piece[ROOK] | board->piece[QUEEN]) & board->color[player];
-	const Bitboard king = (board->piece[KING]) & board->color[player];
-	Board next;
-	int count = 0, enemy_count;
-	Move move;
-	MoveArray move_array;
-	Bitboard pawn_potential_move = 0;
-	Bitboard to_empty = 0; // Empty squares where the nemy can move
-	Bitboard to_capture = 0;
-	Bitboard blocking = 0;
-	MapArray player_array, enemy_array, harmful_array;
-	Bitboard harmless, king_to = 0, to;
-	Bitboard from;
-	Bitboard from_mask;
-	Bitboard to_mask;
+	const Bitboard promotion = PROMOTION_RANK[player]; // Bitboard mask of promotion squares
+	const Bitboard enemy_pawn = board->piece[PAWN] & board->color[enemy]; // Bitboard mask of enemy pawns
+	const Bitboard pawn = board->piece[PAWN] & board->color[player]; // Bitboard mask of player's pawns
+	const Bitboard knight = board->piece[KNIGHT] & board->color[player]; // Bitboard mask of player's knights
+	const Bitboard bishop_queen = (board->piece[BISHOP] | board->piece[QUEEN]) & board->color[player]; // Bitboard mask of player's bishops/queens
+	const Bitboard rook_queen = (board->piece[ROOK] | board->piece[QUEEN]) & board->color[player]; // Bitboard mask of player's rooks/queens
+	const Bitboard king = (board->piece[KING]) & board->color[player]; // Bitboard mask of player's king
+	Board next;    // Next board state after a move is made
+	int count = 0; // Number of legal moves for the next 2 plies (current player & opponent player).
+	Move move;     // a single move
+	MoveArray move_array;    // Array of legal moves for the current player
+	MapArray player_array;   // Map array of player's legal moves
+	MapArray enemy_array;    // Map array of enemy's legal moves (after a nullmove)
+	MapArray harmful_array;  // Map array of player's moves that affect enemy's move generation
+	Bitboard pawn_potential_move = 0; // pawn push by the enemy that can be blocked or unblocked by a player's move
+	Bitboard to_empty = 0;   // Empty squares where the enemy can move: pieces going to here affect the next move generation
+	Bitboard to_capture = 0; // Squares where the enemy can capture: pieces from here cannot move without affecting the next move generation
+	Bitboard blocking = 0;   // Square between a slider & the enemy's king. Playing from or to here can affect the move generation
+	Bitboard harmless;       // Bitboard mask of destination square not affecting the enemy's moves.
+	Bitboard king_to = 0;    // Bitboard mask of the enemy's king destination square
+ 	Bitboard to;             // Bitboard mask of destination squares
+	Bitboard from;           // Bitboard mask of source squares
+	Bitboard from_mask;      // Bitboard mask of harmless source squares for the current player
+	Bitboard to_mask;        // Bitboard mask of harmless destination squares for the current player
 	Bitboard king_threat[] = {
 		MASK[k].pawn_attack[enemy], // squares from where pawns cannot check
-		MASK[k].knight, // squares from where knights cannot check
-		MASK[k].bishop.full_mask, // squares from where bishops cannot check or pin
-		MASK[k].rook.full_mask, // squares from where rooks cannot check or pin
+		MASK[k].knight,             // squares from where knights cannot check
+		MASK[k].bishop.full_mask,   // squares from where bishops cannot check or pin
+		MASK[k].rook.full_mask,     // squares from where rooks cannot check or pin
 		MASK[k].bishop.full_mask | MASK[k].rook.full_mask, // squares from where a queen cannot check or pin
-		MASK[k].king, // squares from where the king cannot touch the opponent king
+		MASK[k].king,               // squares from where the king cannot touch the opponent king
 	};
-	int i, j;
+	int i, j; // indices for iterating over move arrays
 
 	// compute map for both players
 	maparray_generate(&player_array, board, player);
 	maparray_generate(&enemy_array, board, enemy);
 
 	// perft for the next player, should be invariant after some moves
-	enemy_count = maparray_to_count(&enemy_array, enemy);
+	const int enemy_count = maparray_to_count(&enemy_array, enemy);
 
 	// compute to_empty: empty squares where the next player can move and to_capture, where the next player can capture
 	for (i = 0; i < enemy_array.n; i++) {
@@ -2272,9 +2282,7 @@ static int perft_nullmove(const Board *board) {
 	}
 	to_empty |= enemy_array.pawn_map.push | enemy_array.pawn_map.double_push;
 	to_empty |= enemy_array.pawn_map.left_capture | enemy_array.pawn_map.right_capture;
-	to_capture |= enemy_array.pawn_map.left_capture | enemy_array.pawn_map.right_capture | enemy_array.pawn_map.enpassant;
-
-	// computing safe destination squares
+	to_capture |= enemy_array.pawn_map.left_capture | enemy_array.pawn_map.right_capture;
 	if (enemy) {
 		to_empty |=  (((enemy_pawn & ~COLUMN[0]) >> 9) | ((enemy_pawn & ~COLUMN[7]) >> 7)) & empty;
 		pawn_potential_move = enemy_pawn >> 8;
@@ -2314,21 +2322,29 @@ static int perft_nullmove(const Board *board) {
 		king_threat[KING]   |= MASK[nk].king;
 	}
 
+	// Mask of squares that can be moved from, excluding squares:
+	//   - blocking king move threats
+	//   - where the enemy can capture a piece
+	//   - blocking an enemy pawn push
+	from_mask = ~(blocking | to_capture | pawn_potential_move);
+	// Mask of squares that can be moved to, excluding moves:
+	//   - blocking or a king move threat
+	//   - that capture a piece
+	//   - to a square where the enemy can move to
+	to_mask = ~to_empty & empty & ~blocking;
+
 	// (non pawn) moves
 	harmful_array.n = 0;
-	harmful_array.pawn_map = player_array.pawn_map;
-	from_mask = ~(blocking | to_capture | pawn_potential_move);
-	to_mask = ~to_empty & empty & ~blocking;
 	for (i = j = 0; i < player_array.n; i++) {
 		const Map *map = player_array.map + i;
 		from = square_to_bit(map->from);
 
 		harmless = 0;
-		if ((from & from_mask) && (map->to & king_to) == 0) {
-			harmless = map->to & to_mask;
-			harmless &= ~king_threat[map->piece];
-			if (map->piece == KING) harmless &= ~castling[player];
-			count += stdc_count_ones_ull(harmless) * enemy_count;
+		if ((from & from_mask) && (map->to & king_to) == 0) { // keep moves from squares that we can move from & that do not threat the king
+			harmless = map->to & to_mask;             // keep moves to squares that can be moved to
+			harmless &= ~king_threat[map->piece];     // exclude the one that can threat the king
+			if (map->piece == KING) harmless &= ~castling[player]; // exclude castling moves
+			count += stdc_count_ones_ull(harmless) * enemy_count; // multiply harmless move count by enemy count and add to total count
 		}
 
 		harmful_array.map[j].to = map->to ^ harmless;
@@ -2341,15 +2357,21 @@ static int perft_nullmove(const Board *board) {
 	harmful_array.n = j;
 
 	// pawn push
-	from = pawn & from_mask;
-	harmless = (player ? from >> 8 : from << 8) & harmful_array.pawn_map.push & to_mask & ~promotion & ~king_threat[PAWN];
-	harmful_array.pawn_map.push &= ~harmless;
-	count += stdc_count_ones_ull(harmless) * enemy_count;
+	harmful_array.pawn_map = player_array.pawn_map;
+	to_mask &= ~king_threat[PAWN];
+	from = pawn & from_mask; // harmless source squares
+	harmless = (player ? from >> 8 : from << 8) & harmful_array.pawn_map.push; // legal destination square from harmless source squares
+	harmless &= to_mask & ~promotion; // harmless destination squares
+	harmful_array.pawn_map.push &= ~harmless; // remove harmless destination squares from the harmful array
+	count += stdc_count_ones_ull(harmless) * enemy_count; // multiply harmless move by enemy count and add to total count
 
-	harmless = (player ? harmless >> 8 : harmless << 8 ) & harmful_array.pawn_map.double_push & to_mask & ~king_threat[PAWN];
-	harmful_array.pawn_map.double_push &= ~harmless;
-	count += stdc_count_ones_ull(harmless) * enemy_count;
+	// pawn double push
+	harmless = (player ? harmless >> 8 : harmless << 8) & harmful_array.pawn_map.double_push; // legal destination square from harmless source squares
+	harmless &= to_mask;  // harmless destination squares
+	harmful_array.pawn_map.double_push &= ~harmless; // remove harmless destination squares from the harmful array
+	count += stdc_count_ones_ull(harmless) * enemy_count; // multiply harmless move by enemy count and add to total count
 
+	// compute perft for the remaining moves
 	maparray_to_movearray(&harmful_array, &move_array, player, board->enpassant);
 
 	while ((move = movearray_next(&move_array)) != 0) {
@@ -2486,7 +2508,7 @@ static void test() {
  * @param argv Arguments
  * @return 0
  */
-int main(int argc, char **argv) {
+int main(int argc, char ** argv) {
 	const size_t MAX_HASH_SIZE = get_available_memory();
 	const uint32_t N_PROCESSORS = get_available_processors();
 	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
