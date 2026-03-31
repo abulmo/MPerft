@@ -2602,8 +2602,9 @@ int main(int argc, char ** argv) {
 	// Header output
 	if (verbose) {
 		puts("Magic Perft version 5.0 (c) Richard Delorme 2020 - 2026");
-		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards");
-		else puts("Bitboard move generation based on magic bitboards");
+		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards.");
+		else puts("Bitboard move generation based on magic bitboards.");
+		if (sizeof (Counter) == 16) puts("Using 128 bits counter & Zobrist's key.");
 		printf("Perft setting: ");
 		if (hash_size == 0) printf("no hashing; ");
 		else printf("hashtable size: %u Mbytes (%" PRIu64 " entries); ",
@@ -2668,3 +2669,4 @@ int main(int argc, char ** argv) {
 
 	return 0;
 }
+
