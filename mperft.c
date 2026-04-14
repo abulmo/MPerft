@@ -5,7 +5,7 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 4.1
+ * @version 5.1
  */
 
 /* includes */
