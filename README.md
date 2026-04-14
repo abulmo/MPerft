@@ -100,7 +100,6 @@ full time:  14762.732 s
 ## Performance
 Time to compute perft 7 with bulk counting on a ryzen 9 5950x @ 4.2 Ghz under Linux :
 
-|---------|----------|---------|----------|
 | Version |   Time   | Options | Progress |
 |---------|----------|---------|----------|
 |  1.1    |  3.865 s | -b 7    |          | 
@@ -110,11 +109,9 @@ Time to compute perft 7 with bulk counting on a ryzen 9 5950x @ 4.2 Ghz under Li
 |  5.0    |  3.314 s | -b 7    |  -9.3%   |
 |  5.0    |  2.070 s | -n 7    | +60.1%   |
 |  5.0-128|  2.089 s | -n 7    |  -0.9%   |
-|---------|----------|---------|----------|
 
 Time to compute perft 8 with bulk counting and 256 MB of hash table:
 
-|---------|----------|-------------|----------|
 | Version |   Time   | Options     | Progress |
 |---------|----------|-------------|----------|
 |  1.1    |  9.985 s | -b 8 -H 24  |          |
@@ -123,11 +120,9 @@ Time to compute perft 8 with bulk counting and 256 MB of hash table:
 |  4.1    |  8.420 s | -b 8 -h 256 | +20.4%   |
 |  5.0    |  6.655 s | -n 8 -h 256 | +26.5%   |
 |  5.0-128|  6.949 s | -n 8 -h 256 |  -4.2%   |
-|---------|----------|-------------|----------|
 
 Time to compute perft 9 with bulk counting, 32 threads and 1 GB of hash table:
 
-|---------|----------|--------------------|----------|
 | Version |   Time   | Options            | Progress |
 |---------|----------|--------------------|----------|
 |  2.0    |118.197 s | -b 9 -h 1024       |          |
@@ -136,5 +131,4 @@ Time to compute perft 9 with bulk counting, 32 threads and 1 GB of hash table:
 |  5.0    |  4.374 s | -n 9 -t 32 -h 1024 |  +23.1%  |
 |  5.0-128|  5.350 s | -n 9 -t 32 -h 1024 |  -18.2%  |
 |  5.0-128|  4.835 s | -n 9 -t 32 -h 2048 |  +10.7%  |
-|---------|----------|--------------------|----------|
 
