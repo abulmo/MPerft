@@ -56,6 +56,8 @@ ifeq ($(CC),icx)
 
 	LPF = LLVM_PROFILE_FILE=mperft-%p.profraw
 	BOLT = -Xlinker --emit-relocs
+#	PGO_GEN = -fprofile-generate
+#	PGO_USE = -fprofile-use=mperft.profdata
 	PGO_GEN = -fprofile-instr-generate
 	PGO_USE = -fprofile-instr-use=mperft.profdata
 	PGO_MERGE = llvm-profdata merge -output=mperft.profdata *.profraw
@@ -104,9 +106,13 @@ pgo-instr:
 	@echo Compiling with instrumentation for profile-guided optimization...
 	@$(CC) $(CFLAGS) -march=$(ARCH) $(PGO_GEN) mperft.c -o $(EXE)
 	@echo -n "Running the instrumented binary: "
-	@$(LPF) $(BIN)/$(EXE) -d 6 -b > /dev/null
-	@$(LPF) $(BIN)/$(EXE) -d b -n > /dev/null
-	@$(LPF) $(BIN)/$(EXE) -d 7 -n -t 4 -h 256 -q  > /dev/null;
+	@ echo -n -e "1\b"
+	@$(LPF) $(BIN)/$(EXE) --bench -b -h 256 > /dev/null
+	@ echo -n -e "2\b"
+	@$(LPF) $(BIN)/$(EXE) --bench -n -h 256 > /dev/null
+	@ echo -n -e "3\b"
+	@$(LPF) $(BIN)/$(EXE) --bench 7 -n -t 2 -h 256 > /dev/null;
+	@ echo "done"
 	@$(PGO_MERGE)
 
 release:
