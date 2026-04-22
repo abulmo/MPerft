@@ -5,7 +5,7 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 5.1
+ * @version 5.2
  */
 
 /* includes */
@@ -340,7 +340,6 @@ static Counter perft(const Board*, const uint32_t);
 /**
  * @brief Counter to a string, with thousands separated by a comma
  * Limitations:
- *  - Assume that the counter is less than 10^36
  *  - this function is not reentrant.
  *  - do not use the locale separator (on purpose)
  *
@@ -2053,9 +2052,9 @@ static inline void hash_clear(HashTable *hash_table) {
  * @param depth Depth
  * @return Count
  */
-static uint64_t hash_probe(const HashTable *hash_table, const Key *key, const uint32_t depth) {
-	Hash *hash = hash_table->hash + (key->index & hash_table->mask);
-	atomic_int *spin = hash_table->spin + (key->index & hash_table->mask);
+static Counter hash_probe(const HashTable *hash_table, const Key *key, const uint32_t depth) {
+	Hash *hash = hash_table->hash + ((key->index + depth) & hash_table->mask);
+	atomic_int *spin = hash_table->spin + ((key->index + depth) & hash_table->mask);
 
 	HASH_STATS(atomic_fetch_add(&probe_tries, 1);)
 
@@ -2063,7 +2062,7 @@ static uint64_t hash_probe(const HashTable *hash_table, const Key *key, const ui
 		if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) {
 			spin_lock(spin + i);
 			if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) {
-				uint64_t count = hash[i].data >> 6;
+				Counter count = hash[i].data >> 6;
 				HASH_STATS(atomic_fetch_add(&probe_successes, 1);)
 				spin_unlock(spin + i);
 				return count;
@@ -2081,10 +2080,10 @@ static uint64_t hash_probe(const HashTable *hash_table, const Key *key, const ui
  * @param depth Depth
  * @param count Count
  */
-static void hash_store(const HashTable *hash_table, const Key *key, const uint32_t depth, const uint64_t count) {
-	Hash *hash = (hash_table->hash + (key->index & hash_table->mask));
-	atomic_int *spin = hash_table->spin + (key->index & hash_table->mask);
-	const uint64_t data = count << 6 | depth;
+static void hash_store(const HashTable *hash_table, const Key *key, const uint32_t depth, const Counter count) {
+	Hash *hash = (hash_table->hash + ((key->index + depth) & hash_table->mask));
+	atomic_int *spin = hash_table->spin + ((key->index + depth) & hash_table->mask);
+	const Counter data = count << 6 | depth;
 	int i, j;
 
 	HASH_STATS(atomic_fetch_add(&stores, 1);)
@@ -2112,13 +2111,13 @@ static void hash_store(const HashTable *hash_table, const Key *key, const uint32
  * @param hashtable Hash table
  * @param key Key
  */
-static inline void hash_prefetch(const HashTable *hashtable, const Key *key) {
+static inline void hash_prefetch(const HashTable *hashtable, const Key *key, const uint32_t depth) {
 #if defined(__x86_64__)
-	_mm_prefetch((const char*) (hashtable->hash + (key->index & hashtable->mask)), _MM_HINT_T2);
-	_mm_prefetch((const char*) (hashtable->spin + (key->index & hashtable->mask)), _MM_HINT_T2);
+	_mm_prefetch((const char*) (hashtable->hash + ((key->index + depth) & hashtable->mask)), _MM_HINT_T2);
+	_mm_prefetch((const char*) (hashtable->spin + ((key->index + depth) & hashtable->mask)), _MM_HINT_T2);
 #elif defined __GNUC__
-	__builtin_prefetch((const char*) (hashtable->hash + (key->index & hashtable->mask)));
-	__builtin_prefetch((const char*) (hashtable->spin + (key->index & hashtable->mask)));
+	__builtin_prefetch((const char*) (hashtable->hash + ((key->index + depth) & hashtable->mask)));
+	__builtin_prefetch((const char*) (hashtable->spin + ((key->index + depth) & hashtable->mask)));
 #endif
 }
 
@@ -2150,7 +2149,7 @@ static void task_free(Task *task) {
  * @param task Task
  */
 static void task_run(Task *task) {
-	uint64_t count;
+	Counter count;
 	Node *node = task->node;
 	const Board *board = &task->board;
 	const Key *key = &board->key;
@@ -2320,7 +2319,7 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
  * @param node Node to wait for
  * @return Total count of nodes
  */
-static inline uint64_t node_wait(const Node *node) {
+static inline Counter node_wait(const Node *node) {
 	while (node->n_split > 0) thrd_yield();
 
 	return node->count;
@@ -2557,7 +2556,7 @@ static Counter perft(const Board *board, const uint32_t depth) {
 	while ((move = movearray_next(&ma)) != 0) {
 		if (use_hash) {
 			key_update(&key, board, move);
-			hash_prefetch(hash_table, &key);
+			hash_prefetch(hash_table, &key, depth - 1);
 		}
 		board_copymake(board, move, &next);
 		if (depth == 1) ++count;
@@ -2624,9 +2623,9 @@ static void test() {
 		{"20.", "rnbqkb1r/pp1p1ppp/2p5/4P3/2B5/8/PPP1NnPP/RNBQK2R w KQkq - 0 6", 94854874131, 7},
 		{NULL, NULL, 0, 0}
 	};
-
 	printf("Testing the board generator\n");
 	for (const TestBoard *t = tests; t->fen != NULL; ++t) {
+		if (hash_table) hash_clear(hash_table);
 		printf("Test %s %s", t->comments, t->fen); fflush(stdout);
 		board_set(&board, t->fen);
 		Counter count = perft(&board, t->depth);
@@ -2634,6 +2633,32 @@ static void test() {
 		else {
 			printf(" FAILED ! %s", pretty_counter(count));
 			printf("!= %s\n", pretty_counter(t->result));
+		}
+	}
+
+	// crunch big numbers?
+	if ((sizeof(Counter) == 16) && hash_table != NULL) {
+		const TestBoard test_128[] = {
+			{"21.", "3qk3/8/8/8/8/8/8/4K3 w - - 0 1", 13516301912748014678U, 21}, // modulo 1<<64
+			{"22.", "3rk3/8/8/8/8/8/8/4K3 w - - 0 1",  2691458755018406080U, 21}, // modulo 1<<64
+			{"23.", "3bk3/8/8/8/8/8/8/4K3 w - - 0 1",  8284050814118346098U, 21}, // modulo 1<<64
+			{"24.", "3nk3/8/8/8/8/8/8/4K3 w - - 0 1",  5232262261440359445U, 21}, // modulo 1<<64
+			{"25.", "4k3/p7/8/8/8/8/8/4K3 w - - 0 1",  1200845285142814984U, 21}, // fit int a 64 bit counter
+			{NULL, NULL, 0, 0}
+		};
+		const Counter high[] = {142, 32, 6, 1, 0}, *m = high; // missing part of the above 128 bit counter
+
+		printf("Testing the board generator with huge int128\n");
+		for (const TestBoard *t = test_128; t->fen != NULL; ++t, ++m) {
+			if (hash_table) hash_clear(hash_table);
+			printf("Test %s %s", t->comments, t->fen); fflush(stdout);
+			board_set(&board, t->fen);
+			Counter count = perft(&board, t->depth);
+			if (count == t->result + (*m << 64)) printf(" passed\n");
+			else {
+				printf(" FAILED ! %s", pretty_counter(count));
+				printf("!= %s\n", pretty_counter(t->result));
+			}
 		}
 	}
 }
@@ -2786,7 +2811,7 @@ int main(int argc, char ** argv) {
 
 	// Header output
 	if (verbose) {
-		puts("Magic Perft version 5.1 (c) Richard Delorme 2020 - 2026");
+		puts("Magic Perft version 5.2 (c) Richard Delorme 2020 - 2026");
 		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards.");
 		else puts("Bitboard move generation based on magic bitboards.");
 		if (sizeof (Counter) == 16) puts("Using 128 bits counter & Zobrist's key.");
