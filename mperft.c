@@ -491,9 +491,9 @@ static inline int get_available_processors(void) {
 	GetSystemInfo(&si);
 	return si.dwNumberOfProcessors;
 #elif defined(__APPLE__) || defined(__FreeBSD__)
-	int count;
+	int count = 1;
 	size_t size = sizeof(count);
-	if (!sysctlbyname("hw.ncpu", &count, &size, NULL, 0)) count = 1;
+	if (sysctlbyname("hw.ncpu", &count, &size, NULL, 0) != 0) count = 1;
 	return count;
 #else
 	return 1;
