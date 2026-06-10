@@ -5,7 +5,7 @@
  *
  * @author Richard Delorme
  * @copyright 2020-2026
- * @version 5.2
+ * @version 5.3
  */
 
 /* includes */
@@ -236,9 +236,9 @@ typedef struct {
 
 /** HashTable: Struct to represent a hash table */
 typedef struct {
-	Hash *hash; ///< Array of hash entries
+	Hash *hash;       ///< Array of hash entries
 	atomic_int *spin; ///< Array of spin locks
-	uint64_t mask; ///< Hash table mask
+	uint64_t mask;    ///< Hash table mask
 } HashTable;
 
 /** Task: Struct to represent a task in the search tree */
@@ -417,8 +417,7 @@ static const char* pretty_time(double t) {
 
 	if (d) sprintf(buf, "%2d:%02d:%02d:%02d.%03d", sign*d, h, m, s, ms);
 	else if (h) sprintf(buf, "%s%2d:%02d:%02d.%03d", space, sign*h, m, s, ms);
-	else if (m) sprintf(buf, "%s%s%2d:%02d.%03d", space, space, sign*m, s, ms);
-	else sprintf(buf, "%s%s%s%2d.%03d", space, space, space, sign*s, ms);
+	else sprintf(buf, "%s%s%2d:%02d.%03d", space, space, sign*m, s, ms);
 
 	return buf;
 }
@@ -2008,7 +2007,7 @@ static HashTable* hash_create(const size_t size) {
 	if (hash_table == NULL) memory_error(__func__);
 	hash_table->hash = malloc((n + BUCKET_SIZE) * sizeof (Hash));
 	if (hash_table->hash == NULL) memory_error(__func__);
-	hash_table->spin = malloc((n + BUCKET_SIZE) * sizeof (atomic_int));
+	hash_table->spin = calloc((n + BUCKET_SIZE), sizeof (atomic_int));
 	if (hash_table->spin == NULL) memory_error(__func__);
 	hash_table->mask = n - 1;
 
@@ -2032,17 +2031,7 @@ static void hash_destroy(HashTable *hash_table) {
  * @param hash_table Hash table
  */
 static inline void hash_clear(HashTable *hash_table) {
-	size_t i;
 	memset(hash_table->hash, 0, (hash_table->mask + BUCKET_SIZE + 1) * sizeof(Hash));
-	for (i = 0; i <= hash_table->mask + BUCKET_SIZE - 3; i += 4) {
-		spin_init(hash_table->spin + i);
-		spin_init(hash_table->spin + i + 1);
-		spin_init(hash_table->spin + i + 2);
-		spin_init(hash_table->spin + i + 3);
-	}
-	for (; i <= hash_table->mask + BUCKET_SIZE; ++i) {
-		spin_init(hash_table->spin + i);
-	}
 }
 
 /**
@@ -2711,9 +2700,9 @@ void bench() {
  * @return 0
  */
 int main(int argc, char ** argv) {
-	const size_t MAX_HASH_SIZE = get_available_memory();
+	double full_time = -chrono(), partial_time = 0.0, total_time = 0.0;
+	const size_t MAX_HASH_SIZE = get_available_memory() * 9 / 10; // use at most 90% of available memory
 	const uint32_t N_PROCESSORS = get_available_processors();
-	double full_time= -chrono(), partial_time = 0.0, total_time = 0.0;
 	Board board, next;
 	MoveArray ma;
 	Counter count, total = 0;
@@ -2811,7 +2800,7 @@ int main(int argc, char ** argv) {
 
 	// Header output
 	if (verbose) {
-		puts("Magic Perft version 5.2 (c) Richard Delorme 2020 - 2026");
+		puts("Magic Perft version 5.3 (c) Richard Delorme 2020 - 2026");
 		if (HAS_PEXT) puts("Bitboard move generation based on magic (pext) bitboards.");
 		else puts("Bitboard move generation based on magic bitboards.");
 		if (sizeof (Counter) == 16) puts("Using 128 bits counter & Zobrist's key.");
@@ -2831,6 +2820,7 @@ int main(int argc, char ** argv) {
 		for (uint32_t r = 1; r <= n_repetition; ++r) {
 			for (uint32_t d = (loop ? 1 : depth); d <= depth; ++d) {
 				if (n_repetition > 1) printf("repetition: %u\n", r);
+				if (hash_table) hash_clear(hash_table);
 				printf("depth: %u\n", d);
 				movearray_generate(&ma, &board);
 				movearray_sort(&ma);
