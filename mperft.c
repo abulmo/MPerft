@@ -2149,7 +2149,7 @@ static void task_run(Task *task) {
 	spin_lock(&node->spin);
 		SPLIT_STATS(++task->count;)
 		node->count += count;
-		atomic_fetch_sub_explicit(&node->n_split, 1, memory_order_relaxed);
+		atomic_fetch_sub_explicit(&node->n_split, 1, memory_order_acq_rel);
 	spin_unlock(&node->spin);
 
 	// put the task back to the pool
@@ -2278,7 +2278,7 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
 				spin_lock(&node->spin);
 					if (node->n_split < MAX_SPLIT) {
 						task = task_pool->idle_tasks[--task_pool->n_idle];
-						atomic_fetch_add_explicit(&node->n_split, 1, memory_order_relaxed);
+						atomic_fetch_add_explicit(&node->n_split, 1, memory_order_acq_rel);
 					}
 				spin_unlock(&node->spin);
 			}
