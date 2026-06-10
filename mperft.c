@@ -1995,8 +1995,9 @@ static inline void movearray_sort(MoveArray *ma) {
  * @param size Hash table size
  * @return Hash table
  */
-static HashTable* hash_create(const size_t size) {
+static HashTable* hash_create(size_t size) {
 	if (size == 0) return NULL;
+	if (size > (SIZE_MAX >> 20)) size = SIZE_MAX >> 20; // to avoid overflow
 
 	const size_t n = stdc_bit_floor_ull(size << 20) / sizeof(Hash);
 
