@@ -99,6 +99,8 @@ full time:  14762.732 s
 - Version 4.1 Code fix & optimisation. Add optionally compiled 128 bit support for crunching big numbers.
 - Version 5.0 Add nullmove counting at the penultimate remaining depth (=2). Significantly faster.
 - Version 5.1 Add Gigantua's benchmark, more readable output & some small enhancements. Slightly faster.
+- Version 5.2 Fix the 128 bits version.
+- Version 5.3 Faster hashtable allocation.
 
 ## Performance
 Time to compute perft 7 with bulk counting on a ryzen 9 5950x @ 4.2 Ghz under Linux :
