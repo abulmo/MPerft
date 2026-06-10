@@ -55,7 +55,6 @@
 		static inline unsigned int stdc_trailing_zeros_ull(const unsigned long long x) { return x ? __builtin_ctzll(x) : 64; }
 		static inline unsigned long long stdc_bit_floor_ull(const unsigned long long x) { return x ? 1ULL << (63 - __builtin_clzll(x)) : x; }
 	#endif
-	static inline unsigned long long stdc_has_single_bit(const unsigned long long x) { return x && (x - 1) & x == 0; }
 #endif
 
 // fast PEXT availability
@@ -260,7 +259,7 @@ typedef struct Task {
 typedef struct Node {
 	Counter count; ///< Count of moves at this node
 	atomic_int spin; ///< Spin lock for the node
-	int n_split; ///< Number of tasks used at this node
+	atomic_int n_split; ///< Number of tasks used at this node
 } Node;
 
 /** TaskPool: Struct to represent a task pool, ie a set of tasks */
@@ -321,7 +320,6 @@ enum {SL_FREE = 0, SL_BUSY = 1};
 /* Globals: shared value & struicture all over the code */
 static Attack ATTACK_BISHOP[BOARD_SIZE]; ///< Attack by bishop for each square of the board
 static Attack ATTACK_ROOK[BOARD_SIZE]; ///< Attack by rook for each square of the board
-static Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
 static Mask MASK[BOARD_SIZE]; ///< Mask for each square of the board
 static Key KEY_PLAYER[COLOR_SIZE]; ///< Key for each player
 static Key KEY_SQUARE[BOARD_SIZE][CPIECE_SIZE]; ///< Key for each square and piece
@@ -391,7 +389,6 @@ static const char* pretty_speed(double n) {
 
 	return buf;
 }
-
 
 /**
  * @brief print a time as d:hh:mm:ss.ms
@@ -1342,7 +1339,7 @@ static Bitboard get_opponent_pins(const Board *board) {
 	while (sliders) {
 		x = square_next(&sliders);
 		between = MASK[k].between[x] & pieces;
-		if (stdc_has_single_bit(between)) pins |= between;
+		if (stdc_has_single_bit_ull(between)) pins |= between;
 	}
 
 	// rook or queen: all square reachable from the king square.
@@ -1350,7 +1347,7 @@ static Bitboard get_opponent_pins(const Board *board) {
 	while (sliders) {
 		x = square_next(&sliders);
 		between = MASK[k].between[x] & pieces;
-		if (stdc_has_single_bit(between)) pins |= between;
+		if (stdc_has_single_bit_ull(between)) pins |= between;
 	}
 
 	return pins & board->color[c];
@@ -1360,7 +1357,7 @@ static Bitboard get_opponent_pins(const Board *board) {
  * @brief Generate checker & pinned pieces for the current player.
  * @param board Board to generate checkers and pins pieces for
  */
-static void generate_checkers(Board *board) {
+static inline void generate_checkers(Board *board) {
 	const Color c = board->player;
 	const Color o = opponent(c);
 	const Square k = board->x_king[c];
@@ -1376,7 +1373,7 @@ static void generate_checkers(Board *board) {
 		x = square_next(&sliders);
 		between = MASK[k].between[x] & pieces;
 		if (between == 0) checkers |= square_to_bit(x);
-		else if (stdc_has_single_bit(between)) pins |= between;
+		else if (stdc_has_single_bit_ull(between)) pins |= between;
 	}
 
 	// rook or queen
@@ -1385,7 +1382,7 @@ static void generate_checkers(Board *board) {
 		x = square_next(&sliders);
 		between = MASK[k].between[x] & pieces;
 		if (between == 0) checkers |= square_to_bit(x);
-		else if (stdc_has_single_bit(between)) pins |= between;
+		else if (stdc_has_single_bit_ull(between)) pins |= between;
 	}
 
 	// other pieces
@@ -2152,7 +2149,7 @@ static void task_run(Task *task) {
 	spin_lock(&node->spin);
 		SPLIT_STATS(++task->count;)
 		node->count += count;
-		node->n_split--;
+		atomic_fetch_sub_explicit(&node->n_split, 1, memory_order_relaxed);
 	spin_unlock(&node->spin);
 
 	// put the task back to the pool
@@ -2250,7 +2247,7 @@ static void taskpool_destroy(TaskPool *task_pool) {
  */
 static inline void node_init(Node *node) {
 	node->count = 0;
-	node->n_split = 0;
+	atomic_init(&node->n_split, 0);
 	spin_init(&node->spin);
 }
 
@@ -2281,7 +2278,7 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
 				spin_lock(&node->spin);
 					if (node->n_split < MAX_SPLIT) {
 						task = task_pool->idle_tasks[--task_pool->n_idle];
-						node->n_split++;
+						atomic_fetch_add_explicit(&node->n_split, 1, memory_order_relaxed);
 					}
 				spin_unlock(&node->spin);
 			}
@@ -2309,7 +2306,7 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
  * @return Total count of nodes
  */
 static inline Counter node_wait(const Node *node) {
-	while (node->n_split > 0) thrd_yield();
+	while (atomic_load_explicit(&node->n_split, memory_order_acquire) > 0) thrd_yield();
 
 	return node->count;
 }
@@ -2788,8 +2785,8 @@ int main(int argc, char ** argv) {
 	if (moves) {
 		while ((moves = parse_move(moves, &board, &move)) != NULL) {
 			board_copymake(&board, move, &next);
-			board = next;
 			key_update(&board.key, &board, move);
+			board = next;
 		}
 	}
 
