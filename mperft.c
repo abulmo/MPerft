@@ -2785,7 +2785,7 @@ int main(int argc, char ** argv) {
 	if (moves) {
 		while ((moves = parse_move(moves, &board, &move)) != NULL) {
 			board_copymake(&board, move, &next);
-			key_update(&board.key, &board, move);
+			key_update(&next.key, &board, move);
 			board = next;
 		}
 	}
