@@ -64,16 +64,6 @@
 	#define HAS_PEXT false
 #endif
 
-/** Counter: a 128 bit unsigned integer */
-#if defined(__SIZEOF_INT128__) && defined(USE_INT128)
-	typedef __int128 int128_t;
-	typedef unsigned __int128 uint128_t;
-	typedef uint128_t Counter;
-#else
-	#undef USE_INT128
-	typedef uint64_t Counter;
-#endif
-
 /** statistics info */
 #define NULLMOVE_STATS(x)
 #define SPLIT_STATS(x)
@@ -84,13 +74,23 @@ NULLMOVE_STATS(static atomic_llong plain_counter = 0;)
 
 SPLIT_STATS(static atomic_llong split_tries = 0;)
 SPLIT_STATS(static atomic_llong split_successes = 0;)
+SPLIT_STATS(static atomic_llong split_wait = 0;)
 
 HASH_STATS(static atomic_llong probe_tries = 0;)
 HASH_STATS(static atomic_llong probe_successes = 0;)
 HASH_STATS(static atomic_llong stores = 0;)
 
+/* Types */
+/** Counter: a 128 bit unsigned integer */
+#if defined(__SIZEOF_INT128__) && defined(USE_INT128)
+	typedef __int128 int128_t;
+	typedef unsigned __int128 uint128_t;
+	typedef uint128_t Counter;
+#else
+	#undef USE_INT128
+	typedef uint64_t Counter;
+#endif
 
-/** Types */
 /** Move size
  * Note that a legal position can't have more than 218 moves:
  * https://lichess.org/@/Tobs40/blog/why-a-reachable-position-can-have-at-most-218-playable-moves/a5xdxeqs
@@ -107,7 +107,7 @@ typedef uint64_t Random;
 typedef enum : int { WHITE, BLACK, COLOR_SIZE } Color;
 
 /** PerftLimits: Enum representing the limits to split the search or to probe the hash */
-enum : int { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3, MIN_HASH_DEPTH = 3 };
+enum : int { MAX_SPLIT = 16, MIN_SPLIT_DEPTH = 4, MIN_SPLIT_REMAINING_MOVES = 3 };
 
 /** Square: Enum representing the squares on the board */
 typedef enum : int {
@@ -236,7 +236,6 @@ typedef struct {
 /** HashTable: Struct to represent a hash table */
 typedef struct {
 	Hash *hash;       ///< Array of hash entries
-	atomic_int *spin; ///< Array of spin locks
 	uint64_t mask;    ///< Hash table mask
 } HashTable;
 
@@ -501,6 +500,19 @@ static inline int get_available_processors(void) {
 }
 
 /**
+ * @brief Pause the cpu
+ */
+static inline void rest(void) {
+#ifdef __x86_64__
+	_mm_pause();
+#elif defined(__ARM_ACLE)
+	__yield();
+#else
+	thrd_yield();
+#endif
+}
+
+/**
  * @brief Initialize a spinlock
  * @param spin spinlock to initialize
  */
@@ -515,7 +527,7 @@ static inline void spin_init(atomic_int *spin) {
 static inline void spin_lock(atomic_int *spin) {
 	for(;;) {
 		if (atomic_exchange_explicit(spin, SL_BUSY, memory_order_acquire) == SL_FREE) return;
-		while (atomic_load_explicit(spin, memory_order_relaxed)) thrd_yield();
+		while (atomic_load_explicit(spin, memory_order_relaxed)) rest();
 	}
 }
 
@@ -2005,8 +2017,6 @@ static HashTable* hash_create(size_t size) {
 	if (hash_table == NULL) memory_error(__func__);
 	hash_table->hash = malloc((n + BUCKET_SIZE) * sizeof (Hash));
 	if (hash_table->hash == NULL) memory_error(__func__);
-	hash_table->spin = calloc((n + BUCKET_SIZE), sizeof (atomic_int));
-	if (hash_table->spin == NULL) memory_error(__func__);
 	hash_table->mask = n - 1;
 
 	return hash_table;
@@ -2019,7 +2029,6 @@ static HashTable* hash_create(size_t size) {
 static void hash_destroy(HashTable *hash_table) {
 	if (hash_table) {
 		free(hash_table->hash);
-		free(hash_table->spin);
 		free(hash_table);
 	}
 }
@@ -2034,6 +2043,8 @@ static inline void hash_clear(HashTable *hash_table) {
 
 /**
  * @brief Hash probe
+ * Use a lockless hashtable, bluring the key with the data to prevent probing of corrupted data as
+ * explained here: https://craftychess.com/hyatt/hashing.html
  * @param hash_table Hash table
  * @param key Key
  * @param depth Depth
@@ -2041,20 +2052,15 @@ static inline void hash_clear(HashTable *hash_table) {
  */
 static Counter hash_probe(const HashTable *hash_table, const Key *key, const uint32_t depth) {
 	Hash *hash = hash_table->hash + ((key->index + depth) & hash_table->mask);
-	atomic_int *spin = hash_table->spin + ((key->index + depth) & hash_table->mask);
 
 	HASH_STATS(atomic_fetch_add(&probe_tries, 1);)
 
 	for (int i = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) {
-			spin_lock(spin + i);
-			if (hash[i].code == key->code && (hash[i].data & 0x3f) == depth) {
-				Counter count = hash[i].data >> 6;
-				HASH_STATS(atomic_fetch_add(&probe_successes, 1);)
-				spin_unlock(spin + i);
-				return count;
-			}
-			spin_unlock(spin + i);
+
+		if (hash[i].code == (key->code ^ hash[i].data) && (hash[i].data & 0x3f) == depth) {
+			Counter count = hash[i].data >> 6;
+			HASH_STATS(atomic_fetch_add(&probe_successes, 1);)
+			return count;
 		}
 	}
 	return 0;
@@ -2062,6 +2068,8 @@ static Counter hash_probe(const HashTable *hash_table, const Key *key, const uin
 
 /**
  * @brief Store a count result into the hash table.
+ * Use a lockless hashtable, bluring the key with the data to prevent probing of corrupted data as
+ * explained here: https://craftychess.com/hyatt/hashing.html
  * @param hash_table Hash table
  * @param key Key
  * @param depth Depth
@@ -2069,28 +2077,17 @@ static Counter hash_probe(const HashTable *hash_table, const Key *key, const uin
  */
 static void hash_store(const HashTable *hash_table, const Key *key, const uint32_t depth, const Counter count) {
 	Hash *hash = (hash_table->hash + ((key->index + depth) & hash_table->mask));
-	atomic_int *spin = hash_table->spin + ((key->index + depth) & hash_table->mask);
 	const Counter data = count << 6 | depth;
 	int i, j;
 
 	HASH_STATS(atomic_fetch_add(&stores, 1);)
 
 	for (i = j = 0; i < BUCKET_SIZE; ++i) {
-		if (hash[i].code == key->code && hash[i].data == data) {
-			spin_lock(spin + i);
-			if (hash[i].code == key->code && hash[i].data == data) {
-				spin_unlock(spin + i);
-				return;
-			};
-			spin_unlock(spin + i);
-		}
-		if (hash[i].data < hash[j].data) j = i; // here we don't care of the lock, a few bad chosen storage place is fine.
+		if (hash[i].code == (key->code ^ hash[i].data) && hash[i].data == data) return;
+		if (hash[i].data < hash[j].data) j = i; // chose the place with the lowest count.
 	}
-
-	spin_lock(spin + j);
-		hash[j].code = key->code;
-		hash[j].data = data;
-	spin_unlock(spin + j);
+	hash[j].code = key->code ^ data; // store a key xored with the data
+	hash[j].data = data;
 }
 
 /**
@@ -2101,10 +2098,8 @@ static void hash_store(const HashTable *hash_table, const Key *key, const uint32
 static inline void hash_prefetch(const HashTable *hashtable, const Key *key, const uint32_t depth) {
 #if defined(__x86_64__)
 	_mm_prefetch((const char*) (hashtable->hash + ((key->index + depth) & hashtable->mask)), _MM_HINT_T2);
-	_mm_prefetch((const char*) (hashtable->spin + ((key->index + depth) & hashtable->mask)), _MM_HINT_T2);
 #elif defined __GNUC__
 	__builtin_prefetch((const char*) (hashtable->hash + ((key->index + depth) & hashtable->mask)));
-	__builtin_prefetch((const char*) (hashtable->spin + ((key->index + depth) & hashtable->mask)));
 #endif
 }
 
@@ -2173,7 +2168,7 @@ static int task_loop(void *param)
 
 	while (task->loop) {
 		if (!task->run) cnd_wait(&task->condition, &task->mutex);
-		if (task->run) task_run(task);
+		else task_run(task);
 	}
 
 	mtx_unlock(&task->mutex);
@@ -2307,7 +2302,8 @@ static bool node_split(Node *node, const Board *board, const int depth, const in
  * @return Total count of nodes
  */
 static inline Counter node_wait(const Node *node) {
-	while (atomic_load_explicit(&node->n_split, memory_order_acquire) > 0) thrd_yield();
+	SPLIT_STATS(atomic_fetch_add(&split_wait, node->n_split);)
+	while (atomic_load_explicit(&node->n_split, memory_order_acquire) > 0) rest();
 
 	return node->count;
 }
@@ -2370,9 +2366,6 @@ static int perft_nullmove(const Board *board) {
 	maparray_generate(&player_array, board, player);
 	maparray_generate(&enemy_array, board, enemy);
 
-	// perft for the next player, should be invariant after some moves
-	const int enemy_count = maparray_to_count(&enemy_array, enemy);
-
 	// compute to_empty: empty squares where the next player can move and
 	// to_capture, where the next player's sliders & pawns can capture
 	for (i = 0; i < enemy_array.n; i++) {
@@ -2400,7 +2393,7 @@ static int perft_nullmove(const Board *board) {
 		pawn_potential_move |= (pawn_potential_move & RANK[2] & empty) << 8;
 	}
 
-	// king: moves should not prevent the king to move (a king cannot move into check).
+	// king: moves should not prevent the opponent king to move (a king cannot move into check).
 	king_to = (MASK[k].king & ~board->color[enemy]) | square_to_bit(k) | castling_enemy;
 	to = king_to;
 	while (to) {
@@ -2430,12 +2423,12 @@ static int perft_nullmove(const Board *board) {
 	}
 
 	// Mask of squares that can be moved from, excluding squares:
-	//   - blocking king move threats
+	//   - blocking opponent king moves
 	//   - where the enemy can capture a piece
 	//   - blocking an enemy pawn push
 	from_mask = ~(blocking | to_capture | pawn_potential_move);
 	// Mask of squares that can be moved to, excluding moves:
-	//   - blocking or a king move threat
+	//   - blocking opponent king moves
 	//   - that capture a piece
 	//   - to a square where the enemy can move to
 	to_mask = ~to_empty & empty & ~blocking;
@@ -2471,14 +2464,14 @@ static int perft_nullmove(const Board *board) {
 	harmless &= to_mask & ~promotion; // harmless destination squares
 	harmful_array.pawn_map.push &= ~harmless; // remove harmless destination squares from the harmful array
 	count += stdc_count_ones_ull(harmless); // total of harmless moves
-
 	// pawn double push
 	harmless = (player ? harmless >> 8 : harmless << 8) & harmful_array.pawn_map.double_push; // legal destination square from harmless source squares
 	harmless &= to_mask;  // harmless destination squares
 	harmful_array.pawn_map.double_push &= ~harmless; // remove harmless destination squares from the harmful array
 	count += stdc_count_ones_ull(harmless); // total of harmless moves
 
-	count *= enemy_count; // multiply harmless moves by enemy count
+	// perft for the next player, invariant for the harmless counted moves
+	if (count) count *= maparray_to_count(&enemy_array, enemy);
 
 	NULLMOVE_STATS(int nm_count = count;)
 	NULLMOVE_STATS(atomic_fetch_add(&nullmove_counter, count);)
@@ -2524,9 +2517,8 @@ static int perft_2(const Board *board) {
  * @return Total count of nodes
  */
 static Counter perft(const Board *board, const uint32_t depth) {
-	const bool use_hash = (hash_table && depth >= MIN_HASH_DEPTH);
 	Board next;
-	Counter count = 0, hash_count;
+	Counter count = 0;
 	Move move;
 	MoveArray ma;
 	Node node;
@@ -2541,15 +2533,15 @@ static Counter perft(const Board *board, const uint32_t depth) {
 	node_init(&node);
 
 	while ((move = movearray_next(&ma)) != 0) {
-		if (use_hash) {
+		if (hash_table) {
 			key_update(&key, board, move);
 			hash_prefetch(hash_table, &key, depth - 1);
 		}
 		board_copymake(board, move, &next);
 		if (depth == 1) ++count;
 		else {
-			if (use_hash) {
-				hash_count = hash_probe(hash_table, &key, depth - 1);
+			if (hash_table) {
+				Counter hash_count = hash_probe(hash_table, &key, depth - 1);
 				if (hash_count == 0) {
 					next.key = key;
 					if (!node_split(&node, &next, depth - 1, movearray_todo(&ma))) {
@@ -2574,6 +2566,7 @@ static void stats_print(FILE *f) {
 	HASH_STATS(fprintf(f, "hash table stats: %lld tries, %lld successes  (%.2f%%)\n", probe_tries, probe_successes, 100.0 * probe_successes / probe_tries);)
 	HASH_STATS(fprintf(f, "hash table stats: %lld stores\n", stores);)
 	SPLIT_STATS(fprintf(f, "split tries: %lld, successes: %lld (%.2f%%)\n", split_tries, split_successes, 100.0 * split_successes / split_tries);)
+	SPLIT_STATS(fprintf(f, "split wait: %lld (%.2f%%)\n", split_wait, 100.0 * split_wait  /split_successes);)
 	SPLIT_STATS(fprintf(f, "run per task:\n");)
 	SPLIT_STATS(for (int id = 0; id < task_pool->n_tasks; ++id) fprintf(f, "task %3d: %12u\n", id, task_pool->tasks[id].count));
 	SPLIT_STATS(fprintf(f, "master  : %12u\n", 1U);)
@@ -2624,37 +2617,39 @@ static void test() {
 	}
 
 	// crunch big numbers?
-	if ((sizeof(Counter) == 16) && hash_table != NULL) {
-		const TestBoard test_128[] = {
-			{"21.", "3qk3/8/8/8/8/8/8/4K3 w - - 0 1", 13516301912748014678U, 21}, // modulo 1<<64
-			{"22.", "3rk3/8/8/8/8/8/8/4K3 w - - 0 1",  2691458755018406080U, 21}, // modulo 1<<64
-			{"23.", "3bk3/8/8/8/8/8/8/4K3 w - - 0 1",  8284050814118346098U, 21}, // modulo 1<<64
-			{"24.", "3nk3/8/8/8/8/8/8/4K3 w - - 0 1",  5232262261440359445U, 21}, // modulo 1<<64
-			{"25.", "4k3/p7/8/8/8/8/8/4K3 w - - 0 1",  1200845285142814984U, 21}, // fit int a 64 bit counter
-			{NULL, NULL, 0, 0}
-		};
-		const Counter high[] = {142, 32, 6, 1, 0}, *m = high; // missing part of the above 128 bit counter
+	#if defined(USE_INT128)
+		if (hash_table != NULL) {
+			const TestBoard test_128[] = {
+				{"21.", "3qk3/8/8/8/8/8/8/4K3 w - - 0 1", 13516301912748014678U, 21}, // modulo 1<<64
+				{"22.", "3rk3/8/8/8/8/8/8/4K3 w - - 0 1",  2691458755018406080U, 21}, // modulo 1<<64
+				{"23.", "3bk3/8/8/8/8/8/8/4K3 w - - 0 1",  8284050814118346098U, 21}, // modulo 1<<64
+				{"24.", "3nk3/8/8/8/8/8/8/4K3 w - - 0 1",  5232262261440359445U, 21}, // modulo 1<<64
+				{"25.", "4k3/p7/8/8/8/8/8/4K3 w - - 0 1",  1200845285142814984U, 21}, // fit int a 64 bit counter
+				{NULL, NULL, 0, 0}
+			};
+			const Counter high[] = {142, 32, 6, 1, 0}, *m = high; // missing part of the above 128 bit counter
 
-		printf("Testing the board generator with huge int128\n");
-		for (const TestBoard *t = test_128; t->fen != NULL; ++t, ++m) {
-			if (hash_table) hash_clear(hash_table);
-			printf("Test %s %s", t->comments, t->fen); fflush(stdout);
-			board_set(&board, t->fen);
-			Counter count = perft(&board, t->depth);
-			if (count == t->result + (*m << 64)) printf(" passed\n");
-			else {
-				printf(" FAILED ! %s", pretty_counter(count));
-				printf("!= %s\n", pretty_counter(t->result));
+			printf("Testing the board generator with huge int128\n");
+			for (const TestBoard *t = test_128; t->fen != NULL; ++t, ++m) {
+				if (hash_table) hash_clear(hash_table);
+				printf("Test %s %s", t->comments, t->fen); fflush(stdout);
+				board_set(&board, t->fen);
+				Counter count = perft(&board, t->depth);
+				if (count == t->result + (*m << 64)) printf(" passed\n");
+				else {
+					printf(" FAILED ! %s", pretty_counter(count));
+					printf("!= %s\n", pretty_counter(t->result));
+				}
 			}
 		}
-	}
+	#endif
 }
 
 /**
  * Benchmark the perft function on a set of positions.
  * this bench is the same as the one in Gigantua perft program.
  */
-void bench() {
+void bench(const bool chessbit) {
 	Board board;
 	typedef struct BenchBoard {
 		char *comment, *fen;
@@ -2664,7 +2659,7 @@ void bench() {
 		{"Initial Position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 7},
 		{"Kiwipete", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -", 6},
 		{"Pos6", "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10", 6},
-		{"Endgame", "5nk1/pp3pp1/2p4p/q7/2PPB2P/P5P1/1P5K/3Q4 w - - 1 28", 6},
+		{"Endgame", "5nk1/pp3pp1/2p4p/q7/2PPB2P/P5P1/1P5K/3Q4 w - - 1 28", 6 + chessbit},
 		{NULL, NULL, 0}
 	};
 	double partial_time = 0.0, total_time = 0.0;
@@ -2708,12 +2703,16 @@ int main(int argc, char ** argv) {
 	const char *fen = NULL, *moves = NULL;
 	uint32_t depth = 6, n_threads = 1, n_repetition = 1;
 	size_t hash_size = 0;
-	bool div = false, loop = false, verbose = true, do_test = false, do_bench = false;
+	bool div = false, loop = false, verbose = true, do_test = false, do_bench = false, like_chessbit = false;
 	Move move;
 
 	// argument
 	for (int i = 1; i < argc; ++i) {
-		if (!strcmp(argv[i], "--bench")) do_bench = true;
+		if (!strcmp(argv[i], "--bench=chessbit")) {
+			do_bench = true;
+			like_chessbit = true;
+		}
+		else if (!strcmp(argv[i], "--bench")) do_bench = true;
 		else if (!strcmp(argv[i], "--bulk") || !strcmp(argv[i], "-b")) bulk = true;
 		else if (!strcmp(argv[i], "--nullmove") || !strcmp(argv[i], "-n")) nullmove = true;
 		else if (!strcmp(argv[i], "--depth") || !strcmp(argv[i], "-d")) depth = atoi(argv[++i]);
@@ -2737,7 +2736,7 @@ int main(int argc, char ** argv) {
 		else {
 			printf("%s <args> \n", argv[0]);
 			puts("Enumerate moves. The following options are available:");
-			puts("\t--bench                 Run a small benchmark.");
+			puts("\t--bench[=chessbit]      Run a small benchmark like Gigantua or Chessbit.");
 			puts("\t--bulk|-b               Do fast bulk counting at the last ply.");
 			puts("\t[--depth|-d] <depth>    Test up to this depth (default = 6).");
 			puts("\t--div                   Print a node count for each move.");
@@ -2776,7 +2775,7 @@ int main(int argc, char ** argv) {
 
 	// bench
 	if (do_bench) {
-		bench();
+		bench(like_chessbit);
 		return 0;
 	}
 
