@@ -56,7 +56,7 @@ build-clang.bat native
 
 ```
 $ mperft --fast -l 12
-Magic Perft version 5.1 (c) Richard Delorme 2020 - 2026
+Magic Perft version 5.3 (c) Richard Delorme 2020 - 2026
 Bitboard move generation based on magic (pext) bitboards.
 Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 threads; with nullmove counting.
   a b c d e f g h
@@ -70,22 +70,20 @@ Perft setting: hashtable size: 32768 Mbytes (2147483652 entries); with 32 thread
 1 R N B Q K B N R 1
   a b c d e f g h
 w, KQkq
-perft  1:                         20 positions in           0.000   9.321 Mpos/s
-perft  2:                        400 positions in           0.000 167.772 Mpos/s
-perft  3:                      8,902 positions in           0.000 352.242 Mpos/s
-perft  4:                    197,281 positions in           0.000 910.293 Mpos/s
-perft  5:                  4,865,609 positions in           0.000   8.367 Gpos/s
-perft  6:                119,060,324 positions in           0.003  30.746 Gpos/s
-perft  7:              3,195,901,860 positions in           0.038  83.711 Gpos/s
-perft  8:             84,998,978,956 positions in           0.385 220.556 Gpos/s
-perft  9:          2,439,530,234,167 positions in           4.564 534.403 Gpos/s
-perft 10:         69,352,859,712,417 positions in          48.956   1.417 Tpos/s
-perft 11:      2,097,651,003,696,806 positions in       10:45.261   3.251 Tpos/s
-perft 12:     62,854,969,236,701,747 positions in     3:36:03.503   4.849 Tpos/s
-total   :     65,024,500,949,358,489 positions in     3:47:42.715   4.759 Tpos/s
-full time:     3:48:30.456 s
-total   :    65024500949358489 leaves in  14714.880 s  4418962235419 leaves/s
-full time:  14762.732 s
+perft  1:                         20 positions in        0:00.000   3.995 Mpos/s
+perft  2:                        400 positions in        0:00.000 186.414 Mpos/s
+perft  3:                      8,902 positions in        0:00.000 321.877 Mpos/s
+perft  4:                    197,281 positions in        0:00.000 898.433 Mpos/s
+perft  5:                  4,865,609 positions in        0:00.000   8.360 Gpos/s
+perft  6:                119,060,324 positions in        0:00.003  30.156 Gpos/s
+perft  7:              3,195,901,860 positions in        0:00.030 103.482 Gpos/s
+perft  8:             84,998,978,956 positions in        0:00.354 239.668 Gpos/s
+perft  9:          2,439,530,234,167 positions in        0:04.046 602.825 Gpos/s
+perft 10:         69,352,859,712,417 positions in        0:44.580   1.556 Tpos/s
+perft 11:      2,097,651,003,696,806 positions in       10:00.076   3.496 Tpos/s
+perft 12:     62,854,969,236,701,747 positions in     3:28:33.121   5.023 Tpos/s
+total   :     65,024,500,949,358,489 positions in     3:39:22.215   4.940 Tpos/s
+full time:     3:39:57.540 s
 ```
 
 ## History
@@ -100,7 +98,7 @@ full time:  14762.732 s
 - Version 5.0 Add nullmove counting at the penultimate remaining depth (=2). Significantly faster.
 - Version 5.1 Add Gigantua's benchmark, more readable output & some small enhancements. Slightly faster.
 - Version 5.2 Fix the 128 bits version.
-- Version 5.3 Faster hashtable allocation.
+- Version 5.3 Code fix. Faster lockless hashtable. 
 
 ## Performance
 Time to compute perft 7 with bulk counting on a ryzen 9 5950x @ 4.2 Ghz under Linux :
@@ -114,7 +112,8 @@ Time to compute perft 7 with bulk counting on a ryzen 9 5950x @ 4.2 Ghz under Li
 |  5.0    |  3.314 s | -b 7    |  -9.3%   |
 |  5.0    |  2.070 s | -n 7    | +60.1%   |
 |  5.1    |  1.993 s | -n 7    |  +3.8%   |
-
+|  5.3    |  2.045 s | -n 7    |  -3.6%   |
+ 
 Time to compute perft 8 with bulk counting and 256 MB of hash table:
 
 | Version |   Time   | Options     | Progress |
@@ -125,6 +124,9 @@ Time to compute perft 8 with bulk counting and 256 MB of hash table:
 |  4.1    |  8.420 s | -b 8 -h 256 | +20.4%   |
 |  5.0    |  6.655 s | -n 8 -h 256 | +26.5%   |
 |  5.1    |  6.522 s | -n 8 -h 256 |  +2.0%   |
+|  5.1    |  6.522 s | -n 8 -h 256 |  +2.0%   |
+|  5.3    |  6.429 s | -n 8 -h 256 |  +1.6%   |
+
 
 Time to compute perft 9 with bulk counting, 32 threads and 1 GB of hash table:
 
@@ -135,4 +137,5 @@ Time to compute perft 9 with bulk counting, 32 threads and 1 GB of hash table:
 |  4.1    |  5.386 s | -b 9 -t 32 -h 1024 |  +16.0%  |
 |  5.0    |  4.708 s | -n 9 -t 32 -h 1024 |  +14.4%  |
 |  5.1    |  4.422 s | -n 9 -t 32 -h 1024 |   +5.3%  |
+|  5.3    |  4.160 s | -n 9 -t 32 -h 1024 |   +5.9%  |
 
